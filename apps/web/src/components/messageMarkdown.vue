@@ -22,13 +22,14 @@
 
 <script setup lang="ts">
 import { computed, h } from "vue";
-import { Markdown, COMPONENT_RENDERERS, parseMarkdownIntoBlocks } from "vue-stream-markdown";
+import { Markdown, COMPONENT_RENDERERS, NodeList, parseMarkdownIntoBlocks } from "vue-stream-markdown";
 import { MarkdownAstParser, postnormalize, type DefinitionNode, type ParsedNode, type SyntaxTree } from "@markmend/ast";
 import type { CodeOptions, ImageNodeRendererProps, LinkNodeRendererProps, ShikiOptions } from "vue-stream-markdown";
 import "vue-stream-markdown/index.css";
 import "vue-stream-markdown/theme.css";
 import markdownOverlays from "./markdownOverlays";
 import markdownImage from "./markdownImage.vue";
+import markdownWorkspaceLink from "./markdownWorkspaceLink.vue";
 import { markdownLocale } from "@/lib/i18n";
 
 const { content, streaming = false, codeOptions, directory } = defineProps<{ content: string; streaming?: boolean; codeOptions?: CodeOptions; directory?: string }>();
@@ -44,6 +45,16 @@ const isDefinition = (block: string) => /^ {0,3}\[(?!\^)[^\]\n]+\]:/.test(block)
 const definitions = computed(() => blocks.value.length > 1 ? blocks.value.filter(isDefinition).join("\n\n") : "");
 
 function renderLink(link: LinkNodeRendererProps) {
+  let path = "";
+  try { path = decodeURIComponent(link.node.url.split(/[?#]/, 1)[0]!); } catch { /* 无效转义交由原链接校验。 */ }
+  // ACT: 仅接管工作区内的 Markdown/文本预览，继续由服务端校验目录边界；不放开外部链接协议。
+  if (directory && /\.(?:md|markdown|txt)$/i.test(path)
+    && !/^(?:[a-z][a-z\d+.-]*:|[\\/])/i.test(path) && !/[\\\u0000-\u001f\u007f]/.test(path)
+    && !path.split("/").includes("..")) {
+    return h(markdownWorkspaceLink, { directory, path }, { default: () => h(NodeList, {
+      nodes: link.node.children, markdownParser: link.markdownParser, deep: link.deep + 1, nodeKey: `${link.nodeKey}:label`,
+    }) });
+  }
   const renderedLink = h(COMPONENT_RENDERERS.link, link);
   let url: URL;
   try { url = new URL(link.node.url.startsWith("//") ? `https:${link.node.url}` : link.node.url); }

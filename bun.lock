@@ -48,6 +48,7 @@
         "@earendil-works/pi-coding-agent": "^0.85.1",
         "@firecrawl/anydoc": "0.2.4",
         "@firecrawl/anydoc-wasm": "0.2.4",
+        "@toonflow/codex-bridge": "workspace:*",
         "@toonflow/ffmpeg": "workspace:*",
         "@toonflow/file": "workspace:*",
         "@toonflow/i18n": "workspace:*",
@@ -157,6 +158,17 @@
     "packages/assets": {
       "name": "@toonflow/assets",
       "version": "0.0.0",
+    },
+    "packages/codexBridge": {
+      "name": "@toonflow/codex-bridge",
+      "dependencies": {
+        "@toonflow/file": "workspace:*",
+        "express": "^5.2.1",
+        "zod": "^4.6.2",
+      },
+      "devDependencies": {
+        "@types/express": "^5.0.6",
+      },
     },
     "packages/ext/canvasNode": {
       "name": "@toonflow/ext-canvas-node",
@@ -1327,6 +1339,8 @@
     "@tiptap/vue-3": ["@tiptap/vue-3@3.31.3", "https://registry.npmmirror.com/@tiptap/vue-3/-/vue-3-3.31.3.tgz", { "optionalDependencies": { "@tiptap/extension-bubble-menu": "^3.31.3", "@tiptap/extension-floating-menu": "^3.31.3" }, "peerDependencies": { "@floating-ui/dom": "^1.0.0", "@tiptap/core": "3.31.3", "@tiptap/pm": "3.31.3", "vue": "^3.0.0" } }, "sha512-PNt0+rm7BXzhe/U+xlNnXBeJ6t9x2mE3902VXeIeEBxu5CrYLCJ0a5yHrof1jU3KwJrLOe/BtlGWjbq4qnTTfQ=="],
 
     "@toonflow/assets": ["@toonflow/assets@workspace:packages/assets"],
+
+    "@toonflow/codex-bridge": ["@toonflow/codex-bridge@workspace:packages/codexBridge"],
 
     "@toonflow/desktop": ["@toonflow/desktop@workspace:apps/desktop"],
 

@@ -1,0 +1,35 @@
+# 本地 Codex 接入
+
+此改造保留 Toonflow 的画布、Agent、素材管理和生成节点，新增本地 Codex 文本与图片供应商。无需修改 Codex 本体，也不复制 ChatGPT 登录凭证。中间层通过官方 App Server 使用本机 `codex login` 的会话。
+
+## 启动
+
+前提：Bun 1.3.14、近期 Node.js、已安装且登录的 Codex CLI。
+
+```sh
+bun install --frozen-lockfile
+bun run build:server
+bun run start:codex
+```
+
+打开 http://127.0.0.1:3000 。文本选择「Codex · 本机」下的模型，图片生成节点选择「Codex · 图片生成 / Codex Image」。连接设置在独立数据目录中自动创建；原有供应商配置保留。
+
+可用环境变量：`TOONFLOW_CODEX_BIN` 指定 Codex 可执行文件，`TOONFLOW_CODEX_PORT` 指定中间层端口（默认 4319），`TOONFLOW_PORT` 指定页面端口（默认 3000），`TOONFLOW_DATA_DIR` 指定独立数据目录。
+
+## 调用方式
+
+- 文本：OpenAI Chat Completions 兼容接口，支持流式文字、参考图和工具调用。每次请求使用独立的 Codex 临时会话；业务工具交回 Toonflow 执行，下轮请求携带完整历史。
+- 图片：独立图片供应商创建异步任务、轮询并把图片写回 Toonflow 工作区。支持最多 8 张参考图、单张最多 20 MB，取消生成时向中间层传递取消。
+- 中间层同时执行最多两个任务。图片任务元数据与产物保存于数据目录的 `codexBridge/jobs`。重启后未完成任务标记失败，不自动重投或重复消耗额度。可提供 UUID 格式的 `Idempotency-Key` 防止重复提交。
+- HTTP 仅监听回环地址，并要求独立随机连接凭证。凭证保存在数据目录的 `codexBridge/connection.json`，仅用于本机连接，不是 ChatGPT 的认证令牌。
+- 任务按平台原始提示词执行；图片尺寸和宽高比传递给生图工具，最终结果以实际生成文件为准。
+
+模型与图片调用消耗本机 Codex 账号的使用额度。App Server 的实验性协议可能随版本变化；本机协议校验与实际调用结果应优先于静态文档。视频、配音继续使用原来的供应商。
+
+## 本机验证记录（2026-10-20）
+
+- 完整 `build:server` 构建通过；中间层独立 TypeScript 检查通过。
+- 通过 Toonflow 原有生成接口实际完成文字生成、工具调用、文生图和单张参考图编辑，图片已写入 `codexPreview` 项目的 `assets` 目录。
+- 中间层为独立工作器配置官方 Responses HTTP 传输，避免当前环境的 WebSocket 重连；认证继续由 Codex 管理，不改动全局配置。切换后实际文字请求约 7 秒，带参考图的竖版海报约 62 秒；耗时会随网络、模型和提示词变化。
+- Codex 已通过 Toonflow 的实际画布工具创建图片与文本节点，图片引用和故事引子正文均已保存到工作区；未直接修改画布 JSON 写入这两个节点。
+- 仓库整体类型检查仍有上游桌面开发包缺失：`electrobun.config.ts` 引用的 `.hutch/devkit/api/config/ElectrobunConfig` 不存在。未用占位声明屏蔽；服务端构建与本地运行已完成实际验证。
