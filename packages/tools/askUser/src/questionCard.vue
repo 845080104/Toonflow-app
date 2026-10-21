@@ -40,7 +40,7 @@
     <p v-else-if="answer" class="answerText">{{ answer }}</p>
     <div v-if="approvalKey && (waiting || automaticAnswer)" class="automaticApproval">
       <el-checkbox v-model="autoApprove" :disabled="submitting">自动批准后续同类确认（本次对话）</el-checkbox>
-      <el-text size="small" type="info">沿用这次选择，可能持续消耗算力；可随时关闭，刷新页面后关闭。含补充说明时请逐次确认。</el-text>
+      <el-text size="small" type="info">首次提交后记住选择，刷新或重开页面仍生效，直到手动关闭。可能持续消耗算力；含补充说明时请逐次确认。</el-text>
     </div>
   </el-card>
 </template>
@@ -76,10 +76,59 @@ import "element-plus/es/components/radio-group/style/css";
 import { IconMessageQuestion } from "@tabler/icons-vue";
 import type { ToolCall } from "@toonflow/tools-scaffold/runtime";
 
-type AutomaticAnswer = { answer?: string; values?: Record<string, unknown> };
-// ACT: 仅当前页面内存生效，按对话、表单结构和选项隔离，不对自由输入或其他题型猜测答案。
+type AutomaticAnswer = { answer?: string; values?: Record<string, string> };
+// ACT: 保存在当前浏览器、当前站点，按对话、表单结构和选项隔离；不保存 API Key，不跨浏览器同步。
+const automaticAnswersStorageKey = "toonflow.askUser.automaticAnswers.v1";
 const automaticAnswers = ref(new Map<string, AutomaticAnswer>());
 const automaticallySubmitted = new Set<string>();
+
+function readAutomaticAnswers(raw: string | null): Map<string, AutomaticAnswer> {
+  const entries: unknown = JSON.parse(raw || "[]");
+  if (!Array.isArray(entries)) throw new Error("自动批准设置格式错误");
+  const answers = new Map<string, AutomaticAnswer>();
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || !entry[0]) continue;
+    const value = entry[1];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    if (typeof value.answer === "string" && value.answer.trim() && value.answer.length <= 8000) {
+      answers.set(entry[0], { answer: value.answer });
+    } else if (value.values && typeof value.values === "object" && !Array.isArray(value.values)) {
+      const fields = Object.entries(value.values);
+      if (fields.length === 1 && fields.every(([key, answer]) => key && typeof answer === "string" && answer.trim() && answer.length <= 8000)) {
+        answers.set(entry[0], { values: Object.fromEntries(fields) as Record<string, string> });
+      }
+    }
+  }
+  return answers;
+}
+
+function saveAutomaticAnswer(key: string, value?: AutomaticAnswer): boolean {
+  try {
+    const answers = readAutomaticAnswers(window.localStorage.getItem(automaticAnswersStorageKey));
+    if (value) answers.set(key, value);
+    else answers.delete(key);
+    window.localStorage.setItem(automaticAnswersStorageKey, JSON.stringify([...answers]));
+    automaticAnswers.value = answers;
+    return true;
+  } catch {
+    ElMessage.error("自动批准设置保存失败，请检查浏览器是否允许本地存储后重试");
+    return false;
+  }
+}
+
+try {
+  automaticAnswers.value = readAutomaticAnswers(window.localStorage.getItem(automaticAnswersStorageKey));
+} catch {
+  ElMessage.error("无法读取自动批准设置，请检查浏览器本地存储");
+}
+window.addEventListener("storage", event => {
+  if (event.key !== automaticAnswersStorageKey && event.key !== null) return;
+  try {
+    automaticAnswers.value = readAutomaticAnswers(event.newValue);
+  } catch {
+    ElMessage.error("无法读取自动批准设置，请检查浏览器本地存储");
+  }
+});
 
 for (const component of [
   ElForm, ElFormItem, ElRow, ElCol, ElInput, ElInputNumber, ElSwitch,
@@ -154,8 +203,8 @@ const automaticAnswer = computed(() => automaticAnswers.value.get(approvalKey.va
 const autoApprove = computed({
   get: () => rememberChoice.value || !!automaticAnswer.value,
   set(value: boolean) {
+    if (!value && !saveAutomaticAnswer(approvalKey.value)) return;
     rememberChoice.value = value;
-    if (!value) automaticAnswers.value.delete(approvalKey.value);
   },
 });
 const statusText = computed(() => {
@@ -200,10 +249,9 @@ async function submitAnswer(skip: boolean, automatic = false) {
     submittedAnswer.value = response.data.data.answer;
     submittedSkipped.value = response.data.data.skipped === true;
     submittedAutomatically.value = automatic;
-    if (skip) { automaticAnswers.value.delete(key); rememberChoice.value = false; }
-    else if (!automatic && rememberChoice.value && remembered) automaticAnswers.value.set(key, remembered);
+    if (!skip && !automatic && rememberChoice.value && remembered) saveAutomaticAnswer(key, remembered);
+    rememberChoice.value = false;
   } catch (error) {
-    if (automatic) automaticAnswers.value.delete(key);
     const message = axios.isAxiosError(error) ? error.response?.data?.message : undefined;
     ElMessage.error(message || (error instanceof Error ? error.message : "提交回答失败"));
   } finally {
