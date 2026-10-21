@@ -38,11 +38,15 @@
       </div>
     </template>
     <p v-else-if="answer" class="answerText">{{ answer }}</p>
+    <div v-if="approvalKey && (waiting || automaticAnswer)" class="automaticApproval">
+      <el-checkbox v-model="autoApprove" :disabled="submitting">自动批准后续同类确认（本次对话）</el-checkbox>
+      <el-text size="small" type="info">沿用这次选择，可能持续消耗算力；可随时关闭，刷新页面后关闭。含补充说明时请逐次确认。</el-text>
+    </div>
   </el-card>
 </template>
 
 <script lang="ts">
-import { computed, ref, shallowRef } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import axios from "axios";
 import formCreate, { type Api, type Options, type Rule } from "@form-create/element-ui";
 import {
@@ -72,6 +76,11 @@ import "element-plus/es/components/radio-group/style/css";
 import { IconMessageQuestion } from "@tabler/icons-vue";
 import type { ToolCall } from "@toonflow/tools-scaffold/runtime";
 
+type AutomaticAnswer = { answer?: string; values?: Record<string, unknown> };
+// ACT: 仅当前页面内存生效，按对话、表单结构和选项隔离，不对自由输入或其他题型猜测答案。
+const automaticAnswers = ref(new Map<string, AutomaticAnswer>());
+const automaticallySubmitted = new Set<string>();
+
 for (const component of [
   ElForm, ElFormItem, ElRow, ElCol, ElInput, ElInputNumber, ElSwitch,
   ElSelect, ElOption, ElCheckbox, ElCheckboxGroup, ElRadio, ElRadioGroup,
@@ -79,13 +88,15 @@ for (const component of [
 </script>
 
 <script setup lang="ts">
-const props = defineProps<{ tool: ToolCall; directory?: string; toolSessionId?: string }>();
+const props = defineProps<{ tool: ToolCall; directory?: string; toolSessionId?: string; conversationId?: string }>();
 const title = computed(() => props.tool.question?.title || (typeof props.tool.args?.title === "string" ? props.tool.args.title.trim() : "") || "请确认");
 const selected = ref("");
 const text = ref("");
 const submitting = ref(false);
 const submittedAnswer = ref("");
 const submittedSkipped = ref(false);
+const submittedAutomatically = ref(false);
+const rememberChoice = ref(false);
 const formApi = shallowRef<Api>();
 const formValues = ref<Record<string, unknown>>({});
 const formOptions = computed<Options>(() => ({ form: { labelPosition: "top", disabled: submitting.value }, submitBtn: false, resetBtn: false }));
@@ -117,7 +128,7 @@ const options = computed(() => {
 const toolResult = computed(() => {
   if (props.tool.status !== "success" || !props.tool.result) return;
   try {
-    return JSON.parse(props.tool.result) as { answer?: unknown; skipped?: boolean };
+    return JSON.parse(props.tool.result) as { answer?: unknown; skipped?: boolean; autoApproved?: boolean };
   } catch { return; }
 });
 const skipped = computed(() => submittedSkipped.value || toolResult.value?.skipped === true);
@@ -128,41 +139,97 @@ const answer = computed(() => {
 });
 const waiting = computed(() => props.tool.status === "running" && !!props.tool.question?.callId && !answer.value);
 const draftAnswer = computed(() => [selected.value, text.value.trim()].filter(Boolean).join("\n"));
+const approvalKey = computed(() => {
+  const scope = props.toolSessionId || props.conversationId;
+  if (!scope) return "";
+  const fields = props.tool.question?.fields;
+  if (fields?.length) {
+    const choices = fields.filter(field => field.type === "radio" || field.type === "select");
+    if (choices.length !== 1 || fields.some(field => field !== choices[0] && (field.required || !["input", "textarea"].includes(field.type)))) return "";
+    return JSON.stringify([props.directory, scope, fields.map(({ field, title, type, required, options }) => ({ field, title, type, required, options }))]);
+  }
+  return options.value.length ? JSON.stringify([props.directory, scope, title.value, options.value]) : "";
+});
+const automaticAnswer = computed(() => automaticAnswers.value.get(approvalKey.value));
+const autoApprove = computed({
+  get: () => rememberChoice.value || !!automaticAnswer.value,
+  set(value: boolean) {
+    rememberChoice.value = value;
+    if (!value) automaticAnswers.value.delete(approvalKey.value);
+  },
+});
 const statusText = computed(() => {
   if (props.tool.status === "error") return "待重新生成";
   if (skipped.value) return "已跳过";
-  if (answer.value) return "已回答";
+  if (answer.value) return submittedAutomatically.value || toolResult.value?.autoApproved ? "已自动批准" : "已回答";
   if (props.tool.status === "interrupted") return "已停止";
   return waiting.value ? "等待回答" : "提问记录";
 });
 
-async function submitAnswer(skip: boolean) {
+function reusableAnswer(values?: Record<string, unknown>): AutomaticAnswer | undefined {
+  if (!approvalKey.value) return;
+  if (!formRules.value.length) return options.value.includes(selected.value) && !text.value.trim() ? { answer: selected.value } : undefined;
+  const fields = props.tool.question!.fields!;
+  const choice = fields.find(field => field.type === "radio" || field.type === "select")!;
+  const value = values?.[choice.field];
+  if (typeof value !== "string" || !choice.options?.includes(value)
+    || fields.some(field => field !== choice && typeof values?.[field.field] === "string" && String(values[field.field]).trim())) return;
+  return { values: { [choice.field]: value } };
+}
+
+async function submitAnswer(skip: boolean, automatic = false) {
   const callId = props.tool.question?.callId;
   const value = draftAnswer.value;
   if (!waiting.value || submitting.value || (!props.toolSessionId && !props.directory) || !callId) return;
-  if (!skip && !formRules.value.length && (!value || value.length > 8000)) return;
+  if (!skip && !automatic && !formRules.value.length && (!value || value.length > 8000)) return;
+  const key = approvalKey.value;
+  const preset = automaticAnswer.value;
+  if (automatic && !preset) return;
   submitting.value = true;
   try {
-    if (!skip && formRules.value.length && !(await formApi.value?.validate().catch(() => false))) return;
+    if (!skip && !automatic && formRules.value.length && !(await formApi.value?.validate().catch(() => false))) return;
+    const values = !skip && !automatic && formRules.value.length ? formApi.value!.formData() : undefined;
+    const remembered = reusableAnswer(values);
+    if (!skip && !automatic && rememberChoice.value && !remembered) throw new Error("自动批准需要选择一个选项，并将补充说明留空");
     const response = await axios.post(props.toolSessionId ? "/api/singleAgent/answer" : "/api/agent/answer", {
       ...(props.toolSessionId ? { sessionId: props.toolSessionId } : { directory: props.directory }),
       callId,
-      ...(skip ? { skipped: true } : formRules.value.length ? { values: formApi.value!.formData() } : { answer: value }),
+      ...(skip ? { skipped: true } : automatic ? { ...preset, autoApproved: true } : formRules.value.length ? { values } : { answer: value }),
     }, { headers: { "x-toonflow-workspace": "1" } });
     if (response.data.code !== 200) throw new Error(response.data.message || "提交回答失败");
     submittedAnswer.value = response.data.data.answer;
     submittedSkipped.value = response.data.data.skipped === true;
+    submittedAutomatically.value = automatic;
+    if (skip) { automaticAnswers.value.delete(key); rememberChoice.value = false; }
+    else if (!automatic && rememberChoice.value && remembered) automaticAnswers.value.set(key, remembered);
   } catch (error) {
+    if (automatic) automaticAnswers.value.delete(key);
     const message = axios.isAxiosError(error) ? error.response?.data?.message : undefined;
     ElMessage.error(message || (error instanceof Error ? error.message : "提交回答失败"));
   } finally {
     submitting.value = false;
   }
 }
+
+watch([waiting, approvalKey, automaticAnswer], () => {
+  const callId = props.tool.question?.callId;
+  if (!waiting.value || !automaticAnswer.value || !callId || automaticallySubmitted.has(callId)) return;
+  automaticallySubmitted.add(callId);
+  void submitAnswer(false, true);
+}, { immediate: true, flush: "post" });
 </script>
 
 <style scoped lang="scss">
 .questionCard {
+  .automaticApproval {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    margin-top: 12px;
+
+    :deep(.el-checkbox__label) { white-space: normal; }
+  }
   .questionHeader {
     display: flex;
     align-items: center;

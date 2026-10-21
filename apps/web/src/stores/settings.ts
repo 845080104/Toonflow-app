@@ -94,7 +94,8 @@ export const customProviders = computed<CustomProvider[]>(() => Array.isArray(se
     && item.models.every((model: CustomProviderModel) => !!model && typeof model.id === "string" && typeof model.label === "string"))
   : []);
 
-export const modelChoices = computed(() => customProviders.value.flatMap(provider => provider.models.map(model => ({
+export const configuredProviders = computed(() => customProviders.value.filter(provider => typeof provider.apiKey === "string" && !!provider.apiKey.trim()));
+export const modelChoices = computed(() => configuredProviders.value.flatMap(provider => provider.models.map(model => ({
   value: JSON.stringify([provider.id, model.id]), providerId: provider.id, modelId: model.id, label: model.label, contextWindow: model.contextWindow,
 }))));
 
@@ -144,6 +145,7 @@ export function saveSettings(update?: (current: Record<string, unknown>) => Reco
       window.dispatchEvent(new CustomEvent("toonflow:plugin-installed", { detail: { type: "provider", name: data.data.mediaProvider.id } }));
     }
     if (patch && Object.hasOwn(patch, "mediaProviderConfigs")) {
+      invalidateNodeModels("media");
       window.dispatchEvent(new Event("toonflow:provider-config-changed"));
     }
     if (data.data?.modelRefreshErrors?.length) ElMessage.warning(`API Key 已保存，部分模型获取失败：${data.data.modelRefreshErrors.join("；")}`);

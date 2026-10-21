@@ -291,8 +291,8 @@ function loadModels() {
   modelsRequest = ai.getMediaModels().then((items) => {
     if (disposed || generating.value || deleting.value) return;
     models.value = items.filter((item) => item.type === "image");
-    // ACT: 只给空配置选默认模型，保留暂时不可用的旧选择及其参数。
-    if (!data.value.model) {
+    // ACT: 密钥被移除或旧默认不可用时，改选已配置密钥的模型；没有可用模型则留空。
+    if (!models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
       const first = models.value[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }

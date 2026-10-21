@@ -41,7 +41,7 @@ export function createQuestionContext(cwd: string, send: (event: Extract<AgentEv
   };
 }
 
-export function answerQuestion(cwd: string, callId: string, response: { answer?: string; values?: unknown; cancelled?: boolean; skipped?: boolean }) {
+export function answerQuestion(cwd: string, callId: string, response: { answer?: string; values?: unknown; cancelled?: boolean; skipped?: boolean; autoApproved?: boolean }) {
   const pending = pendingQuestions.get(callId);
   if (!pending || pending.cwd !== cwd) throw Object.assign(new Error("提问不存在或已结束"), { status: 404 });
   if (response.cancelled) {
@@ -80,6 +80,7 @@ export function answerQuestion(cwd: string, callId: string, response: { answer?:
     if (!parsed.success) throw Object.assign(new Error("请输入回答"), { status: 400 });
     result = { answer: parsed.data };
   }
+  if (response.autoApproved) result.autoApproved = true;
   pending.finish(result);
   return result;
 }

@@ -51,7 +51,7 @@
                       </template>
                       <messageMarkdown v-if="!(part.collapsed ?? true)" :content="part.content" :streaming="!!item.streaming" :directory="directory" />
                     </chat-reasoning>
-                    <toolMessage v-else-if="part.type === 'tool' && !isBrowserTool(part.tool)" v-model:collapsed="part.collapsed" :tool="part.tool" :directory="directory" @copy="copyMessage" />
+                    <toolMessage v-else-if="part.type === 'tool' && !isBrowserTool(part.tool)" v-model:collapsed="part.collapsed" :tool="part.tool" :directory="directory" :conversationId="sessionFile" @copy="copyMessage" />
                     <messageMarkdown v-else-if="part.type === 'text' && part.content" :content="part.content" :streaming="!!item.streaming" :directory="directory" />
                   </template>
                   <attachmentList v-if="item.attachments?.length" :attachments="item.attachments" :directory="directory" />

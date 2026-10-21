@@ -1,5 +1,5 @@
 <template>
-  <component v-if="renderer" :is="renderer" :tool="tool" :directory="directory" :toolSessionId="toolSessionId" @copy="emit('copy', $event)" />
+  <component v-if="renderer" :is="renderer" :tool="tool" :directory="directory" :toolSessionId="toolSessionId" :conversationId="conversationId" @copy="emit('copy', $event)" />
   <el-text v-if="rendererError" type="danger">工具界面加载失败，请停止后重试：{{ rendererError }}</el-text>
   <chat-reasoning v-model:collapsed="collapsed" class="messageReasoning toolCall" expandIconPlacement="left">
     <template #expandIcon><component :is="collapsed ? IconChevronRight : IconChevronDown" :size="14" aria-hidden="true" /></template>
@@ -33,7 +33,7 @@ import chatReasoning from "@tdesign-vue-next/chat/es/chat-reasoning";
 import type { AgentToolCall } from "@toonflow/server/agent/types";
 import messageMarkdown from "@/components/messageMarkdown.vue";
 
-const { tool, directory, toolSessionId } = defineProps<{ tool: AgentToolCall; directory?: string; toolSessionId?: string }>();
+const { tool, directory, toolSessionId, conversationId } = defineProps<{ tool: AgentToolCall; directory?: string; toolSessionId?: string; conversationId?: string }>();
 const emit = defineEmits<{ copy: [content: string] }>();
 const renderer = shallowRef<Component>();
 const rendererError = ref("");

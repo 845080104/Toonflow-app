@@ -32,7 +32,12 @@ function imageOptions(value: unknown, pattern: RegExp) {
 
 export async function listMediaModels(): Promise<MediaModel[]> {
   const installedProviders = await listMediaProviders();
-  return installedProviders.flatMap(provider => provider.models.flatMap(model => {
+  const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
+  // ACT: 设置页仍列出全部供应商；节点与 Agent 只收到已配置密钥的模型，避免选中不可调用的默认项。
+  return installedProviders.filter(provider => {
+    const apiKey = record(configurations[provider.id]).apiKey;
+    return typeof apiKey === "string" && !!apiKey.trim();
+  }).flatMap(provider => provider.models.flatMap(model => {
     if (model.type !== "image" && model.type !== "video" && model.type !== "audio") return [];
     const builtIn = (mediaProviders as readonly Provider[]).find(item => item.id === provider.id)?.models.find(item => item.id === model.id);
     return [{

@@ -181,8 +181,8 @@ function loadModels() {
       return;
     }
     models.value = items.filter(item => item.type === "audio");
-    // ACT: 仅空配置选择默认模型，临时不可用的模型保持原选择，避免静默换供应商。
-    if (!data.value.model) {
+    // ACT: 密钥被移除或旧默认不可用时，改选已配置密钥的模型；没有可用模型则留空。
+    if (!models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
       const first = models.value[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }

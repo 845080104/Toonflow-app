@@ -56,6 +56,7 @@ export function getConfiguredModel(providerId: string, modelId: string) {
   const parsed = providerSchema.safeParse(Array.isArray(providers) ? providers.find(item => item?.id === providerId) : undefined);
   if (!parsed.success) throw Object.assign(new Error("请先在设置中配置模型供应商"), { status: 400 });
   const provider = parsed.data;
+  if (!provider.apiKey.trim()) throw Object.assign(new Error("请先为所选供应商配置 API Key"), { status: 400 });
   const model = provider.models.find(item => item.id === modelId);
   if (!model) throw Object.assign(new Error("所选模型不存在，请重新选择"), { status: 400 });
   const baseUrl = new URL(provider.apiUrl);
@@ -69,7 +70,7 @@ export function listAiModels() {
   if (!Array.isArray(providers)) return [];
   return providers.flatMap(item => {
     const parsed = providerSchema.extend({ id: z.string().min(1), label: z.string() }).safeParse(item);
-    if (!parsed.success) return [];
+    if (!parsed.success || !parsed.data.apiKey.trim()) return [];
     const provider = parsed.data;
     return provider.models.filter(model => model.id.trim()).map(model => {
       const limits = getModelLimits(provider.id, model);
