@@ -67,6 +67,7 @@ export function getConfiguredModel(providerId: string, modelId: string) {
 
 export function listAiModels() {
   const providers = conf.get("settings", {}).customProviders;
+  const defaults = conf.get("settings", {}).defaultModels as { language?: string } | undefined;
   if (!Array.isArray(providers)) return [];
   return providers.flatMap(item => {
     const parsed = providerSchema.extend({ id: z.string().min(1), label: z.string() }).safeParse(item);
@@ -79,7 +80,8 @@ export function listAiModels() {
         contextWindow: limits.contextWindow, maxOutputTokens: limits.maxTokens,
       };
     });
-  });
+  }).sort((left, right) => Number(JSON.stringify([right.providerId, right.modelId]) === defaults?.language)
+    - Number(JSON.stringify([left.providerId, left.modelId]) === defaults?.language));
 }
 
 const aiApis = {

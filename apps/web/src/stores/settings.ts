@@ -95,9 +95,14 @@ export const customProviders = computed<CustomProvider[]>(() => Array.isArray(se
   : []);
 
 export const configuredProviders = computed(() => customProviders.value.filter(provider => typeof provider.apiKey === "string" && !!provider.apiKey.trim()));
+export type ModelType = "language" | "image" | "video";
+export const defaultModels = computed(() => {
+  const value = settings.value.defaultModels as Partial<Record<ModelType, unknown>> | undefined;
+  return Object.fromEntries((["language", "image", "video"] as const).map(type => [type, typeof value?.[type] === "string" ? value[type] : ""])) as Record<ModelType, string>;
+});
 export const modelChoices = computed(() => configuredProviders.value.flatMap(provider => provider.models.map(model => ({
   value: JSON.stringify([provider.id, model.id]), providerId: provider.id, modelId: model.id, label: model.label, contextWindow: model.contextWindow,
-}))));
+}))).sort((left, right) => Number(right.value === defaultModels.value.language) - Number(left.value === defaultModels.value.language)));
 
 export async function loadSettings() {
   if (settingsReady) return;
@@ -124,6 +129,10 @@ export function saveSettings(update?: (current: Record<string, unknown>) => Reco
     if (data.code !== 200) throw new Error("保存设置失败");
     const providers = data.data?.customProviders;
     if ((patch && Object.hasOwn(patch, "customProviders")) || providers) invalidateNodeModels("language");
+    if (patch && Object.hasOwn(patch, "defaultModels")) {
+      invalidateNodeModels("language");
+      invalidateNodeModels("media");
+    }
     if (patch || providers) {
       applyingSettings = true;
       try { settings.value = { ...settings.value, ...patch, ...(providers ? { customProviders: providers } : {}) }; }

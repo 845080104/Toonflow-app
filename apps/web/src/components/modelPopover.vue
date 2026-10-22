@@ -44,7 +44,7 @@
 import { computed, ref, watch } from "vue";
 import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
 import { modelIcon } from "@toonflow/model-icons";
-import { configuredProviders, modelChoices } from "@/stores/settings";
+import { configuredProviders, defaultModels, modelChoices } from "@/stores/settings";
 
 const selectedModel = defineModel<string>({ default: "" });
 const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
@@ -59,6 +59,14 @@ const reasoningOptions = [
 const modelGroups = computed(() => configuredProviders.value.toSorted((left, right) => Number(right.id === "tfRouter") - Number(left.id === "tfRouter")));
 const selectedModelChoice = computed(() => modelChoices.value.find(item => item.value === selectedModel.value));
 const reasoningLabel = computed(() => reasoningOptions.find(item => item.value === reasoningEffort.value)?.label ?? "默认");
+const pendingDefault = ref("");
+watch(() => defaultModels.value.language, value => { pendingDefault.value = value; });
+watch([pendingDefault, () => props.disabled, () => props.active], ([value, disabled, active]) => {
+  if (!value || disabled || !active || !modelChoices.value.some(item => item.value === value)) return;
+  selectedModel.value = value;
+  reasoningEffort.value = "";
+  pendingDefault.value = "";
+});
 watch(modelChoices, items => {
   if (!items.some(item => item.value === selectedModel.value)) {
     selectedModel.value = items[0]?.value ?? "";

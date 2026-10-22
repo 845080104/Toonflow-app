@@ -33,6 +33,7 @@ function imageOptions(value: unknown, pattern: RegExp) {
 export async function listMediaModels(): Promise<MediaModel[]> {
   const installedProviders = await listMediaProviders();
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
+  const defaults = record(conf.get("settings", {}).defaultModels);
   // ACT: 设置页仍列出全部供应商；节点与 Agent 只收到已配置密钥的模型，避免选中不可调用的默认项。
   return installedProviders.filter(provider => {
     const apiKey = record(configurations[provider.id]).apiKey;
@@ -50,7 +51,8 @@ export async function listMediaModels(): Promise<MediaModel[]> {
         imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
       } : {}),
     } as MediaModel];
-  }));
+  })).sort((left, right) => Number(JSON.stringify([right.providerId, right.modelId]) === defaults[right.type])
+    - Number(JSON.stringify([left.providerId, left.modelId]) === defaults[left.type]));
 }
 
 export async function readReference(cwd: string, reference: MediaReference, mediaType: string, signal?: AbortSignal): Promise<Extract<MediaInput, { type: "base64" }>> {

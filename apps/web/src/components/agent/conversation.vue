@@ -184,7 +184,7 @@ import { createPastedTextFile, readTextAttachment } from "./textAttachments";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 import { writeClipboardText } from "@/lib/clipboard";
 import anonymousData from "@/lib/anonymousData";
-import { modelChoices } from "@/stores/settings";
+import { defaultModels, modelChoices } from "@/stores/settings";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { AgentAttachment, AgentConversation, AgentMessage } from "./types";
 import type { AgentEvent, AgentMention, AgentToolCall } from "@toonflow/server/agent/types";
@@ -338,8 +338,8 @@ const senderHeight = ref(44);
 const senderMaxHeight = ref(Math.max(44, window.innerHeight / 2));
 let senderResize: { pointerId: number; y: number; height: number } | undefined;
 const pendingMessage = props.initialSession?.parentFile ? undefined : workspaceStore.pendingAgentMessage;
-const selectedModel = ref(pendingMessage?.model ?? (props.initialSession?.providerId && props.initialSession.modelId
-  ? JSON.stringify([props.initialSession.providerId, props.initialSession.modelId]) : ""));
+const selectedModel = ref(pendingMessage?.model ?? (defaultModels.value.language || (props.initialSession?.providerId && props.initialSession.modelId
+  ? JSON.stringify([props.initialSession.providerId, props.initialSession.modelId]) : "")));
 const contextMenuVisible = ref(false);
 const reasoningEffort = ref(pendingMessage?.reasoningEffort ?? (props.initialSession?.thinkingLevel === "off" ? "" : props.initialSession?.thinkingLevel ?? ""));
 const selectedModelChoice = computed(() => modelChoices.value.find(item => item.value === selectedModel.value));
