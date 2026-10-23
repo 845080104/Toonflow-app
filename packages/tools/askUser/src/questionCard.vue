@@ -38,9 +38,10 @@
       </div>
     </template>
     <p v-else-if="answer" class="answerText">{{ answer }}</p>
-    <div v-if="approvalKey && (waiting || automaticAnswer)" class="automaticApproval">
-      <el-checkbox v-model="autoApprove" :disabled="submitting">自动批准后续同类确认（本次对话）</el-checkbox>
-      <el-text size="small" type="info">首次提交后记住选择，刷新或重开页面仍生效，直到手动关闭。可能持续消耗算力；含补充说明时请逐次确认。</el-text>
+    <div v-if="approvalKey" class="automaticApproval">
+      <el-checkbox v-model="autoApprove" :disabled="submitting">本会话自动批准并继续</el-checkbox>
+      <el-text size="small" type="info">勾选立即生效，本会话后续确认自动同意，可能持续消耗算力。刷新或重开仍保留，直到手动关闭。</el-text>
+      <el-text v-if="waiting && autoApprove && automaticPlan.reason" size="small" type="warning">{{ automaticPlan.reason }}；自动批准保持开启。</el-text>
     </div>
   </el-card>
 </template>
@@ -74,57 +75,98 @@ import "element-plus/es/components/checkbox-group/style/css";
 import "element-plus/es/components/radio/style/css";
 import "element-plus/es/components/radio-group/style/css";
 import { IconMessageQuestion } from "@tabler/icons-vue";
-import type { ToolCall } from "@toonflow/tools-scaffold/runtime";
+import type { QuestionAnswer, QuestionRequest, ToolCall } from "@toonflow/tools-scaffold/runtime";
 
-type AutomaticAnswer = { answer?: string; values?: Record<string, string> };
-// ACT: 保存在当前浏览器、当前站点，按对话、表单结构和选项隔离；不保存 API Key，不跨浏览器同步。
-const automaticAnswersStorageKey = "toonflow.askUser.automaticAnswers.v1";
-const automaticAnswers = ref(new Map<string, AutomaticAnswer>());
+type AutomaticAnswer = Pick<QuestionAnswer, "values"> & { answer?: string };
+// ACT: 只保存当前浏览器的会话开关，不再按题目、表单或选项记忆答案。
+const automaticApprovalStorageKey = "toonflow.askUser.conversationApproval.v2";
+const automaticApprovals = ref(new Set<string>());
 const automaticallySubmitted = new Set<string>();
 
-function readAutomaticAnswers(raw: string | null): Map<string, AutomaticAnswer> {
-  const entries: unknown = JSON.parse(raw || "[]");
-  if (!Array.isArray(entries)) throw new Error("自动批准设置格式错误");
-  const answers = new Map<string, AutomaticAnswer>();
-  for (const entry of entries) {
-    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || !entry[0]) continue;
-    const value = entry[1];
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    if (typeof value.answer === "string" && value.answer.trim() && value.answer.length <= 8000) {
-      answers.set(entry[0], { answer: value.answer });
-    } else if (value.values && typeof value.values === "object" && !Array.isArray(value.values)) {
-      const fields = Object.entries(value.values);
-      if (fields.length === 1 && fields.every(([key, answer]) => key && typeof answer === "string" && answer.trim() && answer.length <= 8000)) {
-        answers.set(entry[0], { values: Object.fromEntries(fields) as Record<string, string> });
-      }
-    }
-  }
-  return answers;
+function confirmationOption(options: string[]): string | undefined {
+  // ACT: 只识别唯一的明确同意/继续选项；模型、风格等实际选择仍需用户提供信息。
+  const matches = options.filter(option => {
+    const value = option.trim().replace(/^[A-Z][.、:：)）]\s*/i, "");
+    return !/^(不|暂不|否|取消|拒绝|停止|暂停|稍后|返回|修改|调整|重做|自行)/.test(value)
+      && /^(同意|确认|批准|通过|审阅通过|继续|开始|生成|采用|按.{0,20}(方案|计划|提示词|分镜|默认)|直接|使用默认|无需修改|无须修改|没问题|可以|好的|是(?:的|[，,。！!]|$)|yes\b|approve\b|confirm\b|continue\b|proceed\b)/i.test(value);
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
-function saveAutomaticAnswer(key: string, value?: AutomaticAnswer): boolean {
+function planAutomaticAnswer(request: QuestionRequest, current: Record<string, unknown>, draft: string): { response?: AutomaticAnswer; reason?: string } {
+  if (draft.trim()) return { reason: "你已填写回答，请手动提交" };
+  if (!request.fields?.length) {
+    const option = confirmationOption(request.options ?? []);
+    return option ? { response: { answer: option } } : { reason: "此处需要填写信息或作出具体选择，请手动回答" };
+  }
+  const values: NonNullable<QuestionAnswer["values"]> = {};
+  for (const field of request.fields) {
+    const value = current[field.field];
+    if (value != null && value !== false && !(typeof value === "string" && !value.trim()) && !(Array.isArray(value) && !value.length)) {
+      return { reason: "你已填写回答，请手动提交" };
+    }
+    if (["radio", "select", "checkbox"].includes(field.type)) {
+      const option = confirmationOption(field.options ?? []);
+      if (!option) return { reason: `“${field.title}”需要你作出具体选择` };
+      values[field.field] = field.type === "checkbox" ? [option] : option;
+    } else if (field.type === "switch" && confirmationOption([field.title])) {
+      values[field.field] = true;
+    } else if (field.required) {
+      return { reason: `需要填写“${field.title}”` };
+    }
+  }
+  return Object.keys(values).length ? { response: { values } } : { reason: "此处需要你提供信息，请手动回答" };
+}
+
+function readAutomaticApprovals(raw: string | null): Set<string> {
+  const entries: unknown = JSON.parse(raw ?? "[]");
+  if (!Array.isArray(entries)) throw new Error("自动批准设置格式错误");
+  return new Set(entries.filter((key): key is string => typeof key === "string" && !!key));
+}
+
+function loadAutomaticApprovals(): Set<string> {
+  const stored = window.localStorage.getItem(automaticApprovalStorageKey);
+  if (stored !== null) return readAutomaticApprovals(stored);
+  const approvals = new Set<string>();
+  const legacy: unknown = JSON.parse(window.localStorage.getItem("toonflow.askUser.automaticAnswers.v1") ?? "[]");
+  // ACT: 迁移旧版已记住的同意选项；新版即使为空也优先，关闭后不再被旧记录重新开启。
+  if (Array.isArray(legacy)) for (const entry of legacy) {
+    if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+    try {
+      const scope: unknown = JSON.parse(entry[0]);
+      const value = entry[1];
+      const answers: unknown[] = value?.values ? Object.values(value.values) : [value?.answer];
+      if (Array.isArray(scope) && typeof scope[1] === "string" && scope[1]
+        && answers.some(answer => typeof answer === "string" && confirmationOption([answer]))) {
+        approvals.add(JSON.stringify(scope.slice(0, 2)));
+      }
+    } catch { /* 忽略单条损坏的旧记录，保留其他会话设置。 */ }
+  }
+  window.localStorage.setItem(automaticApprovalStorageKey, JSON.stringify([...approvals]));
+  return approvals;
+}
+
+function saveAutomaticApproval(key: string, enabled: boolean) {
   try {
-    const answers = readAutomaticAnswers(window.localStorage.getItem(automaticAnswersStorageKey));
-    if (value) answers.set(key, value);
-    else answers.delete(key);
-    window.localStorage.setItem(automaticAnswersStorageKey, JSON.stringify([...answers]));
-    automaticAnswers.value = answers;
-    return true;
+    const approvals = loadAutomaticApprovals();
+    if (enabled) approvals.add(key);
+    else approvals.delete(key);
+    window.localStorage.setItem(automaticApprovalStorageKey, JSON.stringify([...approvals]));
+    automaticApprovals.value = approvals;
   } catch {
     ElMessage.error("自动批准设置保存失败，请检查浏览器是否允许本地存储后重试");
-    return false;
   }
 }
 
 try {
-  automaticAnswers.value = readAutomaticAnswers(window.localStorage.getItem(automaticAnswersStorageKey));
+  automaticApprovals.value = loadAutomaticApprovals();
 } catch {
   ElMessage.error("无法读取自动批准设置，请检查浏览器本地存储");
 }
 window.addEventListener("storage", event => {
-  if (event.key !== automaticAnswersStorageKey && event.key !== null) return;
+  if (event.key !== automaticApprovalStorageKey && event.key !== null) return;
   try {
-    automaticAnswers.value = readAutomaticAnswers(event.newValue);
+    automaticApprovals.value = readAutomaticApprovals(window.localStorage.getItem(automaticApprovalStorageKey));
   } catch {
     ElMessage.error("无法读取自动批准设置，请检查浏览器本地存储");
   }
@@ -145,7 +187,6 @@ const submitting = ref(false);
 const submittedAnswer = ref("");
 const submittedSkipped = ref(false);
 const submittedAutomatically = ref(false);
-const rememberChoice = ref(false);
 const formApi = shallowRef<Api>();
 const formValues = ref<Record<string, unknown>>({});
 const formOptions = computed<Options>(() => ({ form: { labelPosition: "top", disabled: submitting.value }, submitBtn: false, resetBtn: false }));
@@ -190,23 +231,18 @@ const waiting = computed(() => props.tool.status === "running" && !!props.tool.q
 const draftAnswer = computed(() => [selected.value, text.value.trim()].filter(Boolean).join("\n"));
 const approvalKey = computed(() => {
   const scope = props.toolSessionId || props.conversationId;
-  if (!scope) return "";
-  const fields = props.tool.question?.fields;
-  if (fields?.length) {
-    const choices = fields.filter(field => field.type === "radio" || field.type === "select");
-    if (choices.length !== 1 || fields.some(field => field !== choices[0] && (field.required || !["input", "textarea"].includes(field.type)))) return "";
-    return JSON.stringify([props.directory, scope, fields.map(({ field, title, type, required, options }) => ({ field, title, type, required, options }))]);
-  }
-  return options.value.length ? JSON.stringify([props.directory, scope, title.value, options.value]) : "";
+  return scope ? JSON.stringify([props.directory, scope]) : "";
 });
-const automaticAnswer = computed(() => automaticAnswers.value.get(approvalKey.value));
 const autoApprove = computed({
-  get: () => rememberChoice.value || !!automaticAnswer.value,
-  set(value: boolean) {
-    if (!value && !saveAutomaticAnswer(approvalKey.value)) return;
-    rememberChoice.value = value;
-  },
+  get: () => automaticApprovals.value.has(approvalKey.value),
+  set: (value: boolean) => { if (approvalKey.value) saveAutomaticApproval(approvalKey.value, value); },
 });
+const automaticPlan = computed(() => planAutomaticAnswer({
+  title: title.value,
+  question: question.value,
+  options: options.value,
+  fields: props.tool.question?.fields,
+}, formValues.value, draftAnswer.value));
 const statusText = computed(() => {
   if (props.tool.status === "error") return "待重新生成";
   if (skipped.value) return "已跳过";
@@ -215,31 +251,17 @@ const statusText = computed(() => {
   return waiting.value ? "等待回答" : "提问记录";
 });
 
-function reusableAnswer(values?: Record<string, unknown>): AutomaticAnswer | undefined {
-  if (!approvalKey.value) return;
-  if (!formRules.value.length) return options.value.includes(selected.value) && !text.value.trim() ? { answer: selected.value } : undefined;
-  const fields = props.tool.question!.fields!;
-  const choice = fields.find(field => field.type === "radio" || field.type === "select")!;
-  const value = values?.[choice.field];
-  if (typeof value !== "string" || !choice.options?.includes(value)
-    || fields.some(field => field !== choice && typeof values?.[field.field] === "string" && String(values[field.field]).trim())) return;
-  return { values: { [choice.field]: value } };
-}
-
 async function submitAnswer(skip: boolean, automatic = false) {
   const callId = props.tool.question?.callId;
   const value = draftAnswer.value;
   if (!waiting.value || submitting.value || (!props.toolSessionId && !props.directory) || !callId) return;
   if (!skip && !automatic && !formRules.value.length && (!value || value.length > 8000)) return;
-  const key = approvalKey.value;
-  const preset = automaticAnswer.value;
-  if (automatic && !preset) return;
+  const preset = automaticPlan.value.response;
+  if (automatic && (!autoApprove.value || !preset)) return;
   submitting.value = true;
   try {
     if (!skip && !automatic && formRules.value.length && !(await formApi.value?.validate().catch(() => false))) return;
     const values = !skip && !automatic && formRules.value.length ? formApi.value!.formData() : undefined;
-    const remembered = reusableAnswer(values);
-    if (!skip && !automatic && rememberChoice.value && !remembered) throw new Error("自动批准需要选择一个选项，并将补充说明留空");
     const response = await axios.post(props.toolSessionId ? "/api/singleAgent/answer" : "/api/agent/answer", {
       ...(props.toolSessionId ? { sessionId: props.toolSessionId } : { directory: props.directory }),
       callId,
@@ -249,8 +271,6 @@ async function submitAnswer(skip: boolean, automatic = false) {
     submittedAnswer.value = response.data.data.answer;
     submittedSkipped.value = response.data.data.skipped === true;
     submittedAutomatically.value = automatic;
-    if (!skip && !automatic && rememberChoice.value && remembered) saveAutomaticAnswer(key, remembered);
-    rememberChoice.value = false;
   } catch (error) {
     const message = axios.isAxiosError(error) ? error.response?.data?.message : undefined;
     ElMessage.error(message || (error instanceof Error ? error.message : "提交回答失败"));
@@ -259,9 +279,9 @@ async function submitAnswer(skip: boolean, automatic = false) {
   }
 }
 
-watch([waiting, approvalKey, automaticAnswer], () => {
+watch([waiting, autoApprove, automaticPlan], () => {
   const callId = props.tool.question?.callId;
-  if (!waiting.value || !automaticAnswer.value || !callId || automaticallySubmitted.has(callId)) return;
+  if (!waiting.value || !autoApprove.value || !automaticPlan.value.response || !callId || automaticallySubmitted.has(callId)) return;
   automaticallySubmitted.add(callId);
   void submitAnswer(false, true);
 }, { immediate: true, flush: "post" });
