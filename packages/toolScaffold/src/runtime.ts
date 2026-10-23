@@ -81,6 +81,8 @@ export interface MediaJob {
 }
 
 export interface MediaModel {
+  /** 宿主当前保存且有效的默认模型。无匹配默认值时同类全部为 false。 */
+  isDefault?: boolean;
   supportsPrice?: boolean;
   providerId: string;
   providerLabel: string;

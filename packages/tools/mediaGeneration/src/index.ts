@@ -22,7 +22,7 @@ const plugin: ToolPlugin = {
     const listTool: ToolDefinition = {
       name: "listMediaModels",
       label: "查询媒体模型",
-      description: "查询已允许生成的媒体模型，返回 providerId、modelId、类型、模式及支持的画幅、时长、分辨率或音色。生成前先查询，不能猜测模型 ID。",
+      description: "查询已允许生成的媒体模型，返回 providerId、modelId、类型、isDefault（宿主当前默认标记）、模式及支持的画幅、时长、分辨率或音色。视频未明确指定模型时优先沿用 type=video 且 isDefault=true 的可用项，不按技能示例固定二选一。生成前先查询，不能猜测模型 ID。",
       parameters: z.toJSONSchema(listMediaModelsSchema, { io: "input", target: "draft-07" }),
       async execute(_id, params, signal) {
         listMediaModelsSchema.parse(params);

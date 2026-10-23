@@ -44,6 +44,7 @@ export async function listMediaModels(): Promise<MediaModel[]> {
     const builtIn = (mediaProviders as readonly Provider[]).find(item => item.id === provider.id)?.models.find(item => item.id === model.id);
     return [{
       providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: provider.id === "akc" && model.id === "MiniMax-H3" && !model.label.includes("原生兼容") ? `${model.label}（原生兼容）` : model.label, type: model.type,
+      isDefault: JSON.stringify([provider.id, model.id]) === defaults[model.type],
       supportsPrice: "supportsPrice" in provider && provider.supportsPrice === true,
       description: typeof model.description === "string" ? model.description : undefined,
       tags: model.tags as string[] | undefined, icon: model.icon as string | undefined, available: model.available as boolean | undefined,
@@ -55,8 +56,7 @@ export async function listMediaModels(): Promise<MediaModel[]> {
         imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
       } : {}),
     } as MediaModel];
-  })).sort((left, right) => Number(JSON.stringify([right.providerId, right.modelId]) === defaults[right.type])
-    - Number(JSON.stringify([left.providerId, left.modelId]) === defaults[left.type]));
+  })).sort((left, right) => Number(right.isDefault) - Number(left.isDefault));
 }
 
 export async function readReference(cwd: string, reference: MediaReference, mediaType: string, signal?: AbortSignal): Promise<Extract<MediaInput, { type: "base64" }>> {
