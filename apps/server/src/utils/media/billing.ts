@@ -17,7 +17,7 @@ type Account = BalanceSnapshot & {
 
 const unitSchema = z.string().trim().min(1).max(64);
 // ACT: 已安装的旧供应商仍可返回数值报价，统一转换为展示文本。
-const priceSchema = z.object({ price: z.string().trim().min(1), tips: z.string() }).or(
+const priceSchema = z.object({ price: z.string().trim().min(1), tips: z.string(), unavailableReason: z.string().trim().min(1).optional() }).or(
   z.object({ amount: z.number().finite().nonnegative(), unit: unitSchema })
     .transform(({ amount, unit }) => ({ price: `${amount} ${unit}`, tips: "以实际扣费为准" })),
 );

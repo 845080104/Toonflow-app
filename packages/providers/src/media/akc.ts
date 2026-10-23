@@ -68,6 +68,201 @@ function modelInfo(model: AkcModel): ProviderModel {
     } : {}),
   };
 }
+function requestParams(detail: AkcModel, type: "image" | "video" | "audio", request: ImageRequest | VideoRequest | AudioRequest | ProviderPriceRequest, inputUrl: (input: MediaInput | ProviderPriceReference) => unknown) {
+  const parameters = detail.params ?? [];
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(request.other ?? {})) {
+    if (!parameters.some(p => p.name === key)) throw new Error(`模型不支持参数：${key}`);
+    if (value !== "" && value !== null) params[key] = value;
+  }
+  const set = (names: string[], value: unknown) => {
+    const field = parameters.find(p => names.includes(p.name));
+    if (field && params[field.name] === undefined && value !== undefined && value !== "") params[field.name] = value;
+  };
+  const imageRequest = request as ImageRequest;
+  const videoRequest = request as VideoRequest;
+  const audioRequest = request as AudioRequest;
+  const frames = [videoRequest.firstFrame, videoRequest.lastFrame].filter((input): input is MediaInput => !!input);
+  if (frames.length && (request.images?.length || videoRequest.videos?.length || videoRequest.audios?.length)) throw new Error("首尾帧不能与其他参考素材混用");
+  if (frames.length) { set(["mode"], "shouweizhen"); set(["images"], frames.map(inputUrl)); }
+  else if (request.images?.length) {
+    set(["mode"], "cankaosheng");
+    const field = parameters.find(p => p.type === "upload" && ["images", "image_url", "image", "img_url"].includes(p.name) && (!p.available_when?.mode || p.available_when.mode.some(value => String(value) === String(params.mode))));
+    if (!field) throw new Error("此模型不支持图片引用");
+    set([field.name], field.name === "images" || field.name === "image_url" ? request.images.map(inputUrl) : inputUrl(request.images[0]!));
+  }
+  if (videoRequest.audios?.length || videoRequest.videos?.length) set(["mode"], "cankaosheng");
+  if (videoRequest.audios?.length) set(["audio_url", "audios", "sound_file"], videoRequest.audios!.map(inputUrl));
+  if (videoRequest.videos?.length) set(["video_url", "videos"], videoRequest.videos.map(inputUrl));
+  set(["aspect_ratio", "aspectRatio", "ratio"], videoRequest.ratio);
+  if (type === "video") { set(["duration"], videoRequest.duration === undefined ? undefined : String(videoRequest.duration)); set(["resolution"], videoRequest.resolution); set(["audio", "generate_audio"], videoRequest.generateAudio); }
+  if (type === "image") set(["resolution", "imageSize", "size"], imageRequest.size);
+  if (type === "audio") { set(["voice_id", "voice"], audioRequest.voice); set(["speed", "speech_rate"], audioRequest.speed); set(["format"], audioRequest.format); set(["sample_rate"], audioRequest.sampleRate); }
+  for (const p of parameters) {
+    if (p.name === "prompt") continue;
+    const applicable = !p.available_when || Object.entries(p.available_when).every(([key, values]) => key === "需上传" ? values.some(value => !!params[String(value)]) : values.some(value => String(value) === String(params[key])));
+    if (!applicable) { delete params[p.name]; continue; }
+    let value = params[p.name];
+    if (p.type === "upload" && typeof value === "string" && value.trim()) {
+      const urls = value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      if (urls.some(url => !/^https?:\/\//i.test(url))) throw new Error(`${p.label || p.name}须填写公网 HTTP(S) 直链`);
+      value = params[p.name] = ["images", "videos", "audios", "clips", "files", "attachments", "reference_urls"].includes(p.name) ? urls : urls.length === 1 ? urls[0] : urls;
+    }
+    if (p.required && (value === undefined || value === "" || Array.isArray(value) && !value.length)) throw new Error(`请填写模型参数：${p.label || p.name}`);
+    if (value !== undefined && p.options?.length) {
+      const option = p.options.find(option => String(option.value) === String(value));
+      if (!option || option.currently_unavailable) throw new Error(`${p.label || p.name}不支持所选值，请重新获取模型并调整参数`);
+      params[p.name] = option.value;
+    }
+  }
+  return params;
+}
+
+type AkcPriceOption = { param_name: string; option_value: unknown; price_multiplier?: number; price_addition?: number; final_price?: number; final_price_with_reference_video?: number; reference_video_price_per_second?: number };
+type AkcPriceCondition = { param: string; source?: string; op: string; values?: unknown[]; value?: number };
+type AkcPriceGroup = {
+  group_name: string; is_active: boolean; in_key_whitelist?: boolean; excluded_for_this_key?: boolean; billing_method: string;
+  base_price?: number; option_prices?: AkcPriceOption[]; supported_options?: Record<string, unknown[]>;
+  capability_rules?: { effect: string; when: AkcPriceCondition[]; message?: string }[];
+  input_image_price?: number; input_image_free_count?: number; reference_video_billed_as_output?: boolean;
+  reference_video_price_per_second?: number; reference_video_output_multiplier?: number; reference_video_min_two_thirds?: boolean; with_video_output_token_price?: number;
+};
+function entries(value: unknown): unknown[] { return value === undefined || value === null || value === "" ? [] : Array.isArray(value) ? value : [value]; }
+function same(left: unknown, right: unknown) { return String(left).toLowerCase() === String(right).toLowerCase(); }
+function finitePrice(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
+function blocked(reason: string, tips = reason): ProviderPrice { return { price: "暂无法估价", unavailableReason: reason, tips }; }
+function matchCondition(condition: AkcPriceCondition, params: Record<string, unknown>, inputForms: string[]): boolean | undefined {
+  const value = condition.source === "internal" || condition.source === "protocol" ? undefined
+    : condition.source === "derived" ? condition.param === "input_form" ? inputForms : undefined : params[condition.param];
+  if (condition.source === "derived" && condition.param !== "input_form") return undefined;
+  const values = entries(value);
+  const compare = (items: unknown[]) => {
+    if (condition.op === "present") return items.length > 0;
+    if (condition.op === "absent") return !items.length;
+    if (condition.op === "count_gt") return items.length > Number(condition.value);
+    if (condition.op === "count_lt") return items.length < Number(condition.value);
+    if (condition.op === "in") return items.some(item => condition.values?.some(expected => same(item, expected)));
+    if (condition.op === "not_in") return items.some(item => !condition.values?.some(expected => same(item, expected)));
+    if (condition.op === "ext_in") {
+      if (items.some(item => typeof item !== "string")) return undefined;
+      return items.some(item => condition.values?.some(expected => same(String(item).split(/[?#]/)[0]?.split(".").at(-1), expected)));
+    }
+    return undefined;
+  };
+  if (condition.source !== "derived") return compare(values);
+  const possibilities = inputForms.map(form => compare([form]));
+  return possibilities.every(value => value === true) ? true : possibilities.every(value => value === false) ? false : undefined;
+}
+function channelMatches(group: AkcPriceGroup, params: Record<string, unknown>, inputForms: string[]): string | null {
+  for (const [name, allowed] of Object.entries(group.supported_options ?? {})) {
+    if (entries(params[name]).some(value => !allowed.some(option => same(value, option)))) return `${name} 不在渠道支持范围`;
+  }
+  for (const rule of group.capability_rules ?? []) {
+    if (rule.effect !== "reject") continue;
+    const conditions = rule.when.map(condition => matchCondition(condition, params, inputForms));
+    if (conditions.some(value => value === false)) continue;
+    if (conditions.some(value => value === undefined)) throw new Error(`渠道 ${group.group_name} 的限制无法确认：${rule.message || "缺少派单参数或文件扩展名"}`);
+    return rule.message || "参数组合被渠道拒绝";
+  }
+  return null;
+}
+function channelRate(group: AkcPriceGroup, params: Record<string, unknown>) {
+  const axes = [...new Set((group.option_prices ?? []).map(option => option.param_name))];
+  const selected: AkcPriceOption[] = [];
+  for (const axis of axes) {
+    if (!entries(params[axis]).length) throw new Error(`请设置计价参数：${axis}`);
+    const option = group.option_prices?.find(option => option.param_name === axis && same(option.option_value, params[axis]));
+    if (option) selected.push(option);
+  }
+  if (axes.length === 1 && selected.length === 1 && finitePrice(selected[0]!.final_price)) return { rate: selected[0]!.final_price!, options: selected };
+  if (!finitePrice(group.base_price)) throw new Error(`渠道 ${group.group_name} 未提供有效基础单价`);
+  let multiplier = 1, addition = 0;
+  for (const option of selected) {
+    if (!finitePrice(option.price_multiplier) || !finitePrice(option.price_addition) && !(typeof option.price_addition === "number" && Number.isFinite(option.price_addition))) throw new Error(`渠道 ${group.group_name} 缺少组合档位的系数或加成`);
+    multiplier *= option.price_multiplier; addition += option.price_addition!;
+  }
+  const rate = group.base_price * multiplier + addition;
+  if (!finitePrice(rate)) throw new Error(`渠道 ${group.group_name} 返回了无效档位单价`);
+  return { rate, options: selected };
+}
+async function estimate(context: AkcContext, request: ProviderPriceRequest): Promise<ProviderPrice> {
+  const name = request.model === "MiniMax-H3" ? "minimax-h3" : request.model;
+  const [definition, pricing] = await Promise.all([json(context, `/v1/skills/models/${modelPath(name)}`), json(context, `/v1/skills/models/${modelPath(name)}/pricing`)]);
+  const detail = definition as unknown as AkcModel;
+  if (detail.type !== request.type) return blocked("模型类型与当前生成节点不匹配");
+  if (detail.available_for_this_key === false || pricing.available_for_this_key === false) return blocked("当前 API Key 没有此模型的可用渠道");
+  let params: Record<string, unknown>;
+  try {
+    params = requestParams(detail, request.type, { ...request, model: name }, input => input);
+    // 原生 H3 的首尾帧比例由供应商固定为 adaptive，与原生提交保持一致。
+    if (request.model === "MiniMax-H3" && request.type === "video" && request.firstFrame && !Object.keys(request.other ?? {}).length) params.aspect_ratio = "adaptive";
+  } catch (error) { return blocked(error instanceof Error ? error.message : "模型参数无法解析"); }
+  const uploads = (names: string[]) => names.flatMap(name => entries(params[name]));
+  const images = uploads(["images", "image_url", "image", "img_url"]);
+  const videos = uploads(["video_url", "videos", "clips"]);
+  const audios = uploads(["audio_url", "audios", "sound_file"]);
+  const frames = same(params.mode, "shouweizhen") && images.length > 0;
+  const inputForms = frames ? [images.length > 1 ? "shouweizhen" : "shouzhen"] : images.length || videos.length || audios.length ? ["cankaosheng", "quanneng", "quannengcankao"] : ["wensheng"];
+  const groups = (Array.isArray(pricing.channel_groups) ? pricing.channel_groups : []) as AkcPriceGroup[];
+  const available = groups.filter(group => group.is_active && !group.excluded_for_this_key && group.in_key_whitelist !== false);
+  if (!available.length) return blocked("当前 Key 没有已启用的可用渠道");
+  const rejected = new Set<string>();
+  const unknown = new Set<string>();
+  const costs: { channel: string; amount: number; formula: string }[] = [];
+  for (const group of available) {
+    try {
+      const reason = channelMatches(group, params, inputForms);
+      if (reason) { rejected.add(reason); continue; }
+      if (group.billing_method === "按token") throw new Error("该渠道按 token 计费，平台未提供本次生成 token 数的可靠预估，不能把零基础价当免费");
+      if (!["按秒", "按次"].includes(group.billing_method)) throw new Error(`未支持的计费方式：${group.billing_method}`);
+      const { rate, options } = channelRate(group, params);
+      const duration = Number(params.duration);
+      if (group.billing_method === "按秒" && (!Number.isFinite(duration) || duration <= 0)) throw new Error("请设置明确的生成秒数；自动时长或音频驱动的成片时长尚未确定，不能估算最终费用");
+      let amount = group.billing_method === "按秒" ? duration * rate : rate;
+      let formula = group.billing_method === "按秒" ? `${duration} 秒 × ${rate}` : `1 次 × ${rate}`;
+      if (videos.length) {
+        if (group.reference_video_billed_as_output || (group.reference_video_price_per_second ?? 0) > 0) {
+          const durations = videos.map(video => typeof video === "object" && video !== null ? Number((video as ProviderPriceReference).duration) : NaN);
+          if (durations.some(value => !Number.isFinite(value) || value <= 0)) throw new Error("参考视频缺少可读时长（直链未提供元信息，或本地探测不可用），无法计入参考视频附加费");
+          if (group.billing_method !== "按秒") throw new Error("参考视频附加费规则与计费方式不匹配");
+          const seconds = durations.reduce((sum, value) => sum + value, 0);
+          if (group.reference_video_billed_as_output) {
+            amount += seconds * rate; formula += ` + 参考视频 ${seconds} 秒 × ${rate}`;
+          } else {
+            const resolution = options.find(option => option.param_name === "resolution");
+            const videoRate = resolution?.final_price_with_reference_video ?? (options.length ? undefined : group.with_video_output_token_price);
+            const referenceRate = resolution?.reference_video_price_per_second ?? (options.length ? undefined : group.reference_video_price_per_second);
+            if (!finitePrice(videoRate) || !finitePrice(referenceRate)) throw new Error("渠道未提供当前档位的含参考视频单价或参考视频秒价");
+            const chargedSeconds = group.reference_video_min_two_thirds ? Math.max(seconds, Math.ceil(duration * 2 / 3)) : seconds;
+            amount = duration * videoRate + chargedSeconds * referenceRate;
+            formula = `${duration} 秒 × ${videoRate} + 参考视频计费 ${chargedSeconds} 秒 × ${referenceRate}`;
+          }
+        } else if ((group.reference_video_output_multiplier ?? 0) > 0) {
+          const override = options.length === 1 ? options[0]?.final_price_with_reference_video : undefined;
+          const videoRate = override ?? rate * group.reference_video_output_multiplier!;
+          amount = duration * videoRate; formula = `${duration} 秒 × 含参考视频单价 ${videoRate}`;
+        }
+      }
+      if ((group.input_image_price ?? 0) > 0) {
+        const count = Math.max(0, images.length - (group.input_image_free_count ?? 0));
+        amount += count * group.input_image_price!;
+        if (count) formula += ` + 超额参考图 ${count} 张 × ${group.input_image_price}`;
+      }
+      if (!finitePrice(amount)) throw new Error("渠道返回无效价格，无法可靠估算");
+      costs.push({ channel: group.group_name, amount, formula });
+    } catch (error) { unknown.add(error instanceof Error ? error.message : "渠道计价信息不完整"); }
+  }
+  if (unknown.size) return blocked([...unknown][0]!, `无法计算完整区间：${[...unknown].join("；")}。${costs.length ? `其余 ${costs.length} 个渠道可计算，但未将其冒充完整报价。` : ""}`);
+  if (!costs.length) return blocked("当前参数组合没有可报价渠道", [...rejected].join("；") || "当前模型暂无有效渠道报价");
+  costs.sort((a, b) => a.amount - b.amount);
+  const low = costs[0]!, high = costs.at(-1)!;
+  // 区间上下界向外保留四位，避免小额报价被舍入成零或低估上界。
+  const lower = (Math.floor(low.amount * 10000 + 1e-7) / 10000).toFixed(4).replace(/\.?0+$/, "");
+  const upper = (Math.ceil(high.amount * 10000 - 1e-7) / 10000).toFixed(4).replace(/\.?0+$/, "");
+  const label = lower === upper ? lower : `${lower}–${upper}`;
+  return { price: `预计 ${label} 算力`, tips: `${String(pricing.display_name || name)} · ${request.type === "video" ? `${params.resolution || "默认分辨率"} / ${params.duration || "自动"}秒` : params.imageSize || params.resolution || params.size || "当前档位"}；参考图 ${images.length} 张、视频 ${videos.length} 个、音频 ${audios.length} 段。\n${costs.length} 个匹配渠道，策略：${String(pricing.key_channel_strategy || "平台自动分配")}。\n最低 ${low.channel}：${low.formula} = ${low.amount.toFixed(4)} 算力。\n最高 ${high.channel}：${high.formula} = ${high.amount.toFixed(4)} 算力。\n已计入上述参考素材附加费。报价短期缓存；以提交瞬间渠道、折扣和最终实际扣费为准。` };
+}
+
 async function generate(context: AkcContext, type: "image" | "video" | "audio", request: ImageRequest | VideoRequest | AudioRequest): Promise<MediaAsset[]> {
   let taskId = context.tool.task?.upstream?.id;
   if (context.tool.task?.upstream && context.tool.task.upstream.protocol !== "akcMedia") throw new Error("保存任务的协议不匹配，不能重新提交");
@@ -75,16 +270,6 @@ async function generate(context: AkcContext, type: "image" | "video" | "audio", 
     const detail = await json(context, `/v1/skills/models/${modelPath(request.model)}`) as unknown as AkcModel;
     if (detail.type !== type) throw new Error("所选模型类型不匹配，请重新获取同类模型");
     if (detail.available_for_this_key === false) throw new Error("此 API Key 尚未开通该模型的渠道，请到智核密钥管理配置");
-    const parameters = detail.params ?? [];
-    const params: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(request.other ?? {})) {
-      if (!parameters.some(p => p.name === key)) throw new Error(`模型不支持参数：${key}`);
-      if (value !== "" && value !== null) params[key] = value;
-    }
-    const set = (names: string[], value: unknown) => {
-      const field = parameters.find(p => names.includes(p.name));
-      if (field && params[field.name] === undefined && value !== undefined && value !== "") params[field.name] = value;
-    };
     let totalBytes = 0;
     function inputUrl(input: MediaInput) {
       if (input.type === "url") return mediaUrl(input);
@@ -95,42 +280,8 @@ async function generate(context: AkcContext, type: "image" | "video" | "audio", 
       if (totalBytes > 30 * 1024 * 1024) throw new Error("单次内联参考素材合计不能超过 30 MB");
       return value;
     }
-    const imageRequest = request as ImageRequest;
-    const videoRequest = request as VideoRequest;
-    const audioRequest = request as AudioRequest;
-    const frames = [videoRequest.firstFrame, videoRequest.lastFrame].filter((input): input is MediaInput => !!input);
-    if (frames.length && (request.images?.length || videoRequest.videos?.length || videoRequest.audios?.length)) throw new Error("首尾帧不能与其他参考素材混用");
-    if (videoRequest.videos?.some(input => input.type !== "url")) throw new Error("此站的视频参考需公网 URL，请在模型参数里填写视频直链");
-    if (frames.length) { set(["mode"], "shouweizhen"); set(["images"], frames.map(inputUrl)); }
-    else if (request.images?.length) {
-      const field = parameters.find(p => p.type === "upload" && ["images", "image_url", "image", "img_url"].includes(p.name));
-      if (!field) throw new Error("此模型不支持图片引用");
-      set([field.name], field.name === "images" || field.name === "image_url" ? request.images.map(inputUrl) : inputUrl(request.images[0]!));
-      if (request.model === "minimax-h3") set(["mode"], "cankaosheng");
-    }
-    if (videoRequest.audios?.length) set(["audio_url", "audios", "sound_file"], videoRequest.audios!.map(inputUrl));
-    if (videoRequest.videos?.length) set(["video_url", "videos"], videoRequest.videos.map(inputUrl));
-    set(["aspect_ratio", "aspectRatio", "ratio"], videoRequest.ratio);
-    if (type === "video") { set(["duration"], videoRequest.duration === undefined ? undefined : String(videoRequest.duration)); set(["resolution"], videoRequest.resolution); set(["audio", "generate_audio"], videoRequest.generateAudio); }
-    if (type === "image") set(["resolution", "imageSize", "size"], imageRequest.size);
-    if (type === "audio") { set(["voice_id", "voice"], audioRequest.voice); set(["speed", "speech_rate"], audioRequest.speed); set(["format"], audioRequest.format); set(["sample_rate"], audioRequest.sampleRate); }
-    for (const p of parameters) {
-      if (p.name === "prompt") continue;
-      const applicable = !p.available_when || Object.entries(p.available_when).every(([key, values]) => values.some(value => String(value) === String(params[key])));
-      if (!applicable) { delete params[p.name]; continue; }
-      let value = params[p.name];
-      if (p.type === "upload" && typeof value === "string" && value.trim()) {
-        const urls = value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
-        if (urls.some(url => !/^https?:\/\//i.test(url))) throw new Error(`${p.label || p.name}须填写公网 HTTP(S) 直链`);
-        value = params[p.name] = ["images", "videos", "audios", "clips", "files", "attachments", "reference_urls"].includes(p.name) ? urls : urls.length === 1 ? urls[0] : urls;
-      }
-      if (p.required && (value === undefined || value === "" || Array.isArray(value) && !value.length)) throw new Error(`请填写模型参数：${p.label || p.name}`);
-      if (value !== undefined && p.options?.length) {
-        const option = p.options.find(option => String(option.value) === String(value));
-        if (!option || option.currently_unavailable) throw new Error(`${p.label || p.name}不支持所选值，请重新获取模型并调整参数`);
-        params[p.name] = option.value;
-      }
-    }
+    if ((request as VideoRequest).videos?.some(input => input.type !== "url")) throw new Error("此站的视频参考需公网 URL，请在模型参数里填写视频直链");
+    const params = requestParams(detail, type, request, input => inputUrl(input as MediaInput));
     context.tool.task?.log("submitting", "向智核提交生成任务（只提交一次）");
     const created = await json(context, "/v1/media/generate", { model: request.model, prompt: "text" in request ? request.text : request.prompt, params });
     const id = (created.data as { task_id?: unknown } | undefined)?.task_id ?? created.task_id;
@@ -216,7 +367,7 @@ async function generateH3(this: ProviderContext<{ apiKey: string; baseUrl: strin
   }
 }
 export default {
-  id: "akc", label: "智核AI超市", icon: "", version: "0.2.0",
+  id: "akc", label: "智核AI超市", icon: "", version: "0.3.0",
   modelsUrl: "https://api.lk888.ai/v1/skills/models",
   readme: "配置智核 API Key 后点击获取模型，按视频、图片或音频分类勾选导入。模型标签、参数与价格直接从智核查询；价格单位为算力，渠道和档位会影响实际费用。统一媒体协议自动处理不同模型参数，原 MiniMax-H3 保留原生协议兼容。任务 ID 与状态由服务端保存，刷新只恢复查询，不重新提交。视频引用须公网 URL，图片/音频支持内联。",
   rules,
@@ -240,6 +391,7 @@ export default {
     const [detail, pricing] = await Promise.all([json(this, `/v1/skills/models/${modelPath(name)}`), json(this, `/v1/skills/models/${modelPath(name)}/pricing`)]);
     return { ...modelInfo({ ...(detail as unknown as AkcModel), type: detail.type === "chat" ? "text" : detail.type as ModelType }), pricing, fetchedAt: new Date().toISOString() };
   },
+  getPrice(request: ProviderPriceRequest) { return estimate(this, request); },
   generateVideo(request: VideoRequest) {
     if (this.tool.task?.upstream?.protocol === "minimax" || request.model === "MiniMax-H3" && !this.tool.task?.upstream && !Object.keys(request.other ?? {}).length) return generateH3.call(this, request);
     return generate(this, "video", { ...request, model: request.model === "MiniMax-H3" ? "minimax-h3" : request.model });

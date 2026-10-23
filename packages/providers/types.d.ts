@@ -232,7 +232,7 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
   /**
    * 只读估价，不创建生成任务或扣费。request.type 区分图片、视频和音频。
    * 参考素材只传元信息，不传文件内容或地址；其余参数与对应生成请求一致。
-   * 返回 { price, tips }，由供应商自由提供价格展示文本与提示；null 表示当前参数无法估价，节点保留占位。
+   * 返回 { price, tips }，无法完整估价时可附 unavailableReason 说明原因；null 兼容旧供应商的无报价占位。
    */
   getPrice?: (this: ProviderContext<ProviderConfig<TRules>>, request: ProviderPriceRequest) => Promise<ProviderPrice | null>;
   /** 查询当前配置账户的余额；计价单位由供应商返回。 */
@@ -249,6 +249,8 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
 interface ProviderPrice {
   price: string;
   tips: string;
+  /** 无法完整估价时的明确原因，不应将展示文本当作有效报价。 */
+  unavailableReason?: string;
 }
 
 /** 估价专用素材元信息；不包含 base64、二进制、URL 或本地路径。未知字段省略，不能视作 0。 */

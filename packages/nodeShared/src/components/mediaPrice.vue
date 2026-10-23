@@ -1,7 +1,7 @@
 <template>
-  <el-tooltip v-model:visible="infoVisible" :content="priceLabel" :disabled="!priceLabel" placement="top" :showArrow="false" :trigger="['hover', 'focus']" :triggerKeys="[]" :popperStyle="{ maxWidth: '280px', lineHeight: '1.6', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }">
-    <button type="button" class="mediaPrice" :aria-label="price?.price || priceLabel" :aria-busy="loading" @pointerdown.stop @click.stop="infoVisible = Boolean(priceLabel)">
-      <span>{{ loading ? "正在估价…" : price ? price.price : "无法计算价格" }}</span>
+  <el-tooltip v-model:visible="infoVisible" :content="priceLabel" :disabled="!priceLabel" placement="top" :showArrow="false" :trigger="['hover', 'focus']" :triggerKeys="[]" :popperStyle="{ maxWidth: '400px', lineHeight: '1.6', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }">
+    <button type="button" class="mediaPrice" :aria-label="displayPrice" :class="{ unavailable: !loading && (!!error || !!price?.unavailableReason || !supported) }" :aria-busy="loading" @pointerdown.stop @click.stop="infoVisible = Boolean(priceLabel)">
+      <span>{{ displayPrice }}</span>
       <icon-info-circle v-if="!loading && (!price || price.tips)" :size="14" aria-hidden="true" />
     </button>
   </el-tooltip>
@@ -21,7 +21,12 @@ const infoVisible = ref(false);
 const loading = ref(false);
 const error = ref("");
 const revision = ref(0);
-const priceLabel = computed(() => !props.supported ? "当前供应商尚未提供预估价格，无法提前计算费用。你仍可发起生成，实际费用以供应商结算为准。" : loading.value ? "正在查询预估价格" : error.value
+// 只在可见且已挂载的节点面板更新；不创建任务，复用已有短缓存。
+const refreshTimer = setInterval(() => { if (!document.hidden) revision.value++; }, 30000);
+const refreshOnVisible = () => { if (!document.hidden) revision.value++; };
+document.addEventListener("visibilitychange", refreshOnVisible);
+const displayPrice = computed(() => loading.value ? "正在估价…" : !props.supported ? "暂未接入估价" : error.value ? `估价失败：${error.value}` : price.value?.unavailableReason ? `无法估价：${price.value.unavailableReason}` : price.value?.price || "暂无报价：当前参数未返回估价");
+const priceLabel = computed(() => !props.supported ? "当前供应商适配器尚未接入生成前估价。" : loading.value ? "正在查询预估价格" : error.value
   ? `价格查询失败：${error.value}。请检查供应商配置或稍后重试。`
   : price.value ? price.value.tips : "当前模型或参数组合暂无预估价格。你仍可发起生成，实际费用以供应商结算为准。");
 
@@ -32,6 +37,8 @@ function refreshPrice(event: Event) {
 window.addEventListener("toonflow:provider-config-changed", refreshPrice);
 window.addEventListener("toonflow:plugin-installed", refreshPrice);
 onScopeDispose(() => {
+  clearInterval(refreshTimer);
+  document.removeEventListener("visibilitychange", refreshOnVisible);
   window.removeEventListener("toonflow:provider-config-changed", refreshPrice);
   window.removeEventListener("toonflow:plugin-installed", refreshPrice);
 });
@@ -73,7 +80,7 @@ watch([() => JSON.stringify(props.input), () => props.supported, currentDirector
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-  max-width: 160px;
+  max-width: 250px;
   padding: 0;
   border: 0;
   background: none;
@@ -81,10 +88,13 @@ watch([() => JSON.stringify(props.input), () => props.supported, currentDirector
   font-family: inherit;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: right;
+  line-height: 1.5;
   cursor: help;
 
-  > span { overflow: hidden; text-overflow: ellipsis; }
+  > span { overflow-wrap: anywhere; }
+  &.unavailable { color: var(--el-color-warning); }
   > svg { flex-shrink: 0; transform: translateY(1px); }
   &:hover { color: var(--el-text-color-primary); }
   &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; border-radius: 2px; }
