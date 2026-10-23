@@ -31,19 +31,26 @@ export default {
       const data = image.type === "binary" ? Buffer.from(image.data).toString("base64") : image.data;
       return data.startsWith("data:") ? data : `data:${image.mimeType || "image/png"};base64,${data}`;
     });
-    const created = await this.tool.fetch(`${baseUrl}/images/jobs`, {
-      method: "POST", headers, signal,
-      body: JSON.stringify({ model: "codex-image", prompt: request.prompt, images, ratio: request.ratio, size: request.size }),
-    });
-    const task = await created.json() as { id?: string; error?: { message?: string } };
-    if (!created.ok || !task.id) throw new Error(task.error?.message || "无法创建 Codex 图片任务");
-    const taskUrl = `${baseUrl}/images/jobs/${encodeURIComponent(task.id)}`;
+    let taskId = this.tool.task?.upstream?.id;
+    if (!taskId) {
+      this.tool.task?.log("submitting", "提交 Codex 图片任务（只提交一次）");
+      const created = await this.tool.fetch(`${baseUrl}/images/jobs`, {
+        method: "POST", headers, signal,
+        body: JSON.stringify({ model: "codex-image", prompt: request.prompt, images, ratio: request.ratio, size: request.size }),
+      });
+      const task = await created.json() as { id?: string; error?: { message?: string } };
+      if (!created.ok || !task.id) throw new Error(task.error?.message || "无法创建 Codex 图片任务");
+      taskId = task.id;
+      this.tool.task?.save({ id: taskId, protocol: "codexImage" });
+    }
+    const taskUrl = `${baseUrl}/images/jobs/${encodeURIComponent(taskId)}`;
     try {
       while (true) {
         signal.throwIfAborted();
         const response = await this.tool.fetch(taskUrl, { headers, signal });
         const result = await response.json() as { status?: string; error?: string | { message?: string }; data?: { b64_json: string; mime_type: string }[] };
         if (!response.ok) throw new Error(typeof result.error === "object" ? result.error.message : result.error || "查询 Codex 图片任务失败");
+        this.tool.task?.log("polling", `Codex 图片任务：${result.status ?? "等待中"}`);
         if (result.status === "completed") {
           if (!result.data?.length) throw new Error("Codex 图片任务完成但没有返回图片");
           return result.data.map(image => ({ mediaType: "image", type: "base64", data: image.b64_json, mimeType: image.mime_type }));

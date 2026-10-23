@@ -14,6 +14,7 @@
         <el-form-item v-for="item in modelTypes" :key="item.type">
           <template #label>
             <span class="modelLabel"><component :is="item.icon" :size="16" />{{ item.label }}模型</span>
+            <el-button link type="primary" size="small" @click="openCatalog(item.type)">获取智核{{ item.label }}模型</el-button>
             <span class="modelCount">{{ choices[item.type].length }} 个可选</span>
           </template>
           <el-select
@@ -30,23 +31,45 @@
               <el-option v-for="model in group.models" :key="model.value" :label="model.label" :value="model.value" @click="selectedModel(item.type) === model.value && selectModel(item.type, model.value)" />
             </el-option-group>
           </el-select>
+          <mediaModelInfo v-if="selectedChoice(item.type)?.providerId.startsWith('akc')" providerId="akc" :modelId="selectedChoice(item.type)!.modelId" />
         </el-form-item>
       </el-form>
       <p v-if="loadError" class="pickerError" role="alert">{{ loadError }} <el-button link type="primary" @click="loadModels">重试</el-button></p>
       <p class="pickerFooter">切换后自动保存，应用到当前对话和当前画布的同类生成节点；新建节点沿用此选择。进行中的任务不受影响。</p>
     </div>
   </el-popover>
+  <catalogDialog v-model="catalogVisible" :provider="catalogProvider" :initialType="catalogType" @saved="catalogSaved" />
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { ElMessage } from "element-plus";
+import axios from "axios";
+import catalogDialog from "@/components/settings/panels/mediaModel/catalogDialog.vue";
+import type { MediaProvider } from "@/components/settings/panels/mediaModel/types";
+import mediaModelInfo from "@toonflow/node-shared/mediaModelInfo";
 import { IconAdjustmentsHorizontal, IconChevronDown, IconMessage, IconPhoto, IconMovie } from "@tabler/icons-vue";
 import { invalidateNodeModels, useNodeAi, type NodeMediaModel } from "@toonflow/nodes-scaffold/nodeAi";
 import { configuredProviders, defaultModels, modelChoices, saveSettings, type ModelType } from "@/stores/settings";
 
 const visible = ref(false);
+const catalogVisible = ref(false);
+const catalogProvider = ref<MediaProvider>();
+const catalogType = ref<"text" | "image" | "video" | "audio">("video");
+async function openCatalog(type: string) {
+  try {
+    const { data } = await axios.get("/api/providers/media/list");
+    const provider = data.data?.find((item: MediaProvider) => item.id === "akc");
+    if (!provider) throw new Error("请先在设置中添加智核供应商并填写 API Key");
+    catalogProvider.value = provider; catalogType.value = type === "language" ? "text" : type as "image" | "video" | "audio";
+    visible.value = false; catalogVisible.value = true;
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : "读取供应商失败"); }
+}
+async function catalogSaved() { await loadModels(); }
+function openCatalogEvent(event: Event) { void openCatalog((event as CustomEvent<{ type: string }>).detail.type); }
+onMounted(() => window.addEventListener("toonflow:open-model-catalog", openCatalogEvent));
+onScopeDispose(() => window.removeEventListener("toonflow:open-model-catalog", openCatalogEvent));
 const loading = ref(false);
 const saving = ref<ModelType>();
 const loadError = ref("");
@@ -60,7 +83,7 @@ const modelTypes = [
 ] as const;
 const choices = computed(() => {
   const mediaChoices = (type: "image" | "video") => mediaModels.value.filter(model => model.type === type).map(model => ({
-    value: JSON.stringify([model.providerId, model.modelId]), providerId: model.providerId, providerLabel: model.providerLabel, label: model.label,
+    value: JSON.stringify([model.providerId, model.modelId]), providerId: model.providerId, providerLabel: model.providerLabel, label: model.label, modelId: model.modelId,
   }));
   return {
     language: modelChoices.value.map(model => ({ ...model, providerLabel: configuredProviders.value.find(provider => provider.id === model.providerId)?.label ?? model.providerId })),
@@ -72,6 +95,8 @@ const choices = computed(() => {
 function modelGroups(type: ModelType) {
   return [...Map.groupBy(choices.value[type], model => model.providerId)].map(([id, models]) => ({ id, label: models[0]!.providerLabel, models }));
 }
+
+function selectedChoice(type: ModelType) { return choices.value[type].find(model => model.value === selectedModel(type)); }
 
 function selectedModel(type: ModelType) {
   return choices.value[type].find(model => model.value === defaultModels.value[type])?.value ?? choices.value[type][0]?.value ?? "";

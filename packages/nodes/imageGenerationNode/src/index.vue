@@ -53,6 +53,9 @@
           @remove="removeReference" />
         <promptInput v-if="editor?.mode === 'inpaint'" v-model="data.inpaintPromptModel" v-model:text="data.inpaintPrompt" :references="referenceMentions" expandable />
         <promptInput v-else v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" expandable />
+        <el-button v-if="!generating" text size="small" @click="openModelCatalog">获取智核图片模型</el-button>
+        <mediaModelInfo v-if="selectedModel" v-model="data.modelParameters" :providerId="selectedModel.providerId" :modelId="selectedModel.modelId" editable :disabled="generating || deleting" />
+        <mediaTaskStatus :job="mediaJob" :error="taskError" :busy="generating" @resume="generationState.resume()" @stop="generationState.stop()" />
         <div class="promptFooter">
           <el-select
             v-if="editor?.mode !== 'inpaint'"
@@ -91,7 +94,7 @@
               :disabled="deleting || uploading || (!generating && (editor?.busy || !generationPrompt || !selectedModel))"
               :title="generating ? '停止生成' : '生成图片'"
               :aria-label="generating ? '停止生成' : '生成图片'"
-              @click="generating ? generationController?.abort() : startGeneration().catch((error) => showNodeError(error, '图片生成失败'))" />
+              @click="generating ? generationState.stop() : startGeneration().catch((error) => showNodeError(error, '图片生成失败'))" />
           </div>
         </div>
       </el-card>
@@ -121,6 +124,8 @@ import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
 import promptInput from "@toonflow/node-shared/promptInput";
 import referenceItem from "@toonflow/node-shared/referenceItem";
 import mediaHistory from "@toonflow/node-shared/mediaHistory";
+import mediaModelInfo from "@toonflow/node-shared/mediaModelInfo";
+import mediaTaskStatus from "@toonflow/node-shared/mediaTaskStatus";
 import mediaPrice from "@toonflow/node-shared/mediaPrice";
 import imageGridSplit from "@toonflow/node-image/imageGridSplit";
 import imageEditor from "@toonflow/node-image/imageEditor";
@@ -143,7 +148,7 @@ const { id, node, nodeProps, nodeEvent, outputs, files, ai, updateNodeInternals 
   label: "图片生成",
 });
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
-const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; inpaintPrompt: string; inpaintPromptModel: PromptModel; model: string; size: string; ratio: string; inpaint?: ImageInpaint });
+const data = computed(() => node.data as { modelParameters: Record<string, unknown>; modelParameterValues: Record<string, Record<string, unknown>>; prompt: string; promptModel: PromptModel; inpaintPrompt: string; inpaintPromptModel: PromptModel; model: string; size: string; ratio: string; inpaint?: ImageInpaint });
 data.value.prompt ??= "";
 data.value.promptModel ??= [];
 data.value.inpaintPrompt ??= "";
@@ -173,11 +178,21 @@ const previewVisible = ref(false);
 const inpaintPreviewVisible = ref(false);
 const imageWidth = ref(0);
 let generationController: AbortController | undefined;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort());
+const generationState = useNodeGeneration(outputs, () => generationController?.abort(), {
+  ai, directory: () => files.getWorkspaceFiles().list(), data: node.data, type: "image",
+});
+const { job: mediaJob, error: taskError } = generationState;
 const { generating } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
+data.value.modelParameterValues ??= {};
+data.value.modelParameters ??= {};
+watch(() => data.value.model, (value, previous) => {
+  if (previous) data.value.modelParameterValues[previous] = data.value.modelParameters;
+  data.value.modelParameters = data.value.modelParameterValues[value] ?? {};
+}, { flush: "sync" });
+
 const sizeOptions = computed(() => (selectedModel.value?.imageSizes?.length ? selectedModel.value.imageSizes : ["2K"]));
 const ratioOptions = computed(() => (selectedModel.value?.imageRatios?.length ? selectedModel.value.imageRatios : ["16:9"]));
 watch(
@@ -192,6 +207,8 @@ watch(
   },
   { flush: "sync" }
 );
+function openModelCatalog() { window.dispatchEvent(new CustomEvent("toonflow:open-model-catalog", { detail: { type: "image" } })); }
+watch(generating, value => { if (!value && !disposed) void loadModels().catch(error => showNodeError(error, "模型读取失败")); });
 const modelGroups = computed(() => groupNodeModels(models.value));
 const generationPrompt = computed(() =>
   [
@@ -209,6 +226,7 @@ const generationInput = computed<Omit<NodeImageRequest, "directory"> | undefined
   const input = {
     providerId: choice.providerId,
     modelId: choice.modelId,
+    other: data.value.modelParameters,
     prompt: generationPrompt.value,
     size: data.value.size,
     ratio: data.value.ratio,
@@ -248,7 +266,7 @@ onScopeDispose(() => {
   disposed = true;
   window.removeEventListener("toonflow:plugin-installed", refreshProviderModels);
   window.removeEventListener("toonflow:provider-config-changed", refreshProviderModels);
-  generationController?.abort();
+
 });
 
 async function refreshProviderModels(event: Event) {
@@ -289,10 +307,10 @@ function loadModels() {
   if (modelsRequest) return modelsRequest;
   modelsLoading.value = true;
   modelsRequest = ai.getMediaModels().then((items) => {
-    if (disposed || generating.value || deleting.value) return;
+    if (disposed || deleting.value) return;
     models.value = items.filter((item) => item.type === "image");
     // ACT: 密钥被移除或旧默认不可用时，改选已配置密钥的模型；没有可用模型则留空。
-    if (!models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
+    if (!generating.value && !models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
       const first = models.value[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }
@@ -334,7 +352,7 @@ async function startGeneration() {
   const controller = new AbortController();
   const inpaintData = data.value.inpaint;
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  // ACT: 工具立即返回；服务端持有任务，节点关闭仅结束本地轮询。
   generation = generationState.run(() => workspace.list()
     .then(({ directory }) => {
       controller.signal.throwIfAborted();
@@ -351,7 +369,7 @@ async function startGeneration() {
     .finally(() => {
       generationController = undefined;
     });
-  return { status: "generating" };
+  return { status: "starting", message: "已启动本地后台处理；请查询 getGenerationStatus，上游任务 ID 保存后才表示提交成功" };
 }
 
 nodeEvent.on("save", (reason) => {
@@ -409,6 +427,7 @@ function getConfig() {
     config: {
       providerId: selectedModel.value?.providerId ?? "",
       modelId: selectedModel.value?.modelId ?? "",
+      other: data.value.modelParameters,
       size: data.value.size,
       ratio: data.value.ratio,
     },
@@ -432,6 +451,7 @@ nodeTools.register({
   name: "setConfig",
   description: "修改此图片生成节点的模型、分辨率或比例；先用 getConfig 查询可选能力，providerId 与 modelId 必须同时提供；不修改提示词、不启动生成",
   parameters: z.strictObject({
+    other: z.record(z.string(), z.unknown()).optional(),
     providerId: z.string().min(1).optional(),
     modelId: z.string().min(1).optional(),
     size: z.string().min(1).optional(),
@@ -453,6 +473,7 @@ nodeTools.register({
     data.value.model = JSON.stringify([choice.providerId, choice.modelId]);
     if (args.size !== undefined) data.value.size = args.size;
     if (args.ratio !== undefined) data.value.ratio = args.ratio;
+    if (args.other !== undefined) data.value.modelParameters = args.other;
     return getConfig();
   },
 });

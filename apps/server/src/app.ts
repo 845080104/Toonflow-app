@@ -65,7 +65,24 @@ export async function createApp({
       }
       providerRevision = hash.digest("hex");
     }
+    const { validateMediaProviderSource, saveMediaProvider } = await import("@/utils/media/provider");
+    const importedModels = new Map<string, ReturnType<typeof validateMediaProviderSource>["models"]>();
+    for (const name of autoInstallProviders) {
+      const installed = await readFile(resolve(dataDirectory, "providers", name), "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (installed !== null) {
+        try { importedModels.set(name, validateMediaProviderSource(installed).models); }
+        catch { console.warn(`内置供应商 ${name} 的旧模型列表无法解析，使用更新后的定义`); }
+      }
+    }
     await initializePlugins(resolve(dataDirectory, "providers"), sourceDirectory, autoInstallProviders, providerRevision);
+    // ACT: 内置协议可以升级，用户勾选的模型列表（包括主动清空）不能被内置模板覆盖。
+    for (const [name, models] of importedModels) {
+      const updated = validateMediaProviderSource(await readFile(resolve(dataDirectory, "providers", name), "utf8"));
+      if (JSON.stringify(updated.models) !== JSON.stringify(models)) await saveMediaProvider(name, models, updated.revision);
+    }
   }
   // ACT: 技能和团队只补首次安装，保留用户修改。
   if (dataDirectory && skillsRoot) await initializePlugins(resolve(dataDirectory, "skills"), skillsRoot);

@@ -11,7 +11,9 @@
     "./showNodeError": "./src/showNodeError.ts",
     "./useNodeReferences": "./src/useNodeReferences.ts",
     "./useNodeGeneration": "./src/useNodeGeneration.ts",
-    "./groupNodeModels": "./src/groupNodeModels.ts"
+    "./groupNodeModels": "./src/groupNodeModels.ts",
+    "./mediaTaskStatus": "./src/components/mediaTaskStatus.vue",
+    "./mediaModelInfo": "./src/components/mediaModelInfo.vue"
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit"

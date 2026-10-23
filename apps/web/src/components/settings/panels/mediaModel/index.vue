@@ -36,6 +36,7 @@
       <el-button class="addButton" :icon="IconSettings" @click="openAdd('custom')">添加自定义供应商</el-button>
     </div>
     <component :is="mediaProviderDialog" v-model="providerDialogVisible" :mode="addMode" @added="saveProviderItem" />
+    <catalogDialog v-model="catalogVisible" :provider="catalogProvider" @saved="saveCatalog" />
     <component :is="editProviderDialog" v-model="editorVisible" :provider="editingProvider" @saved="saveProviderItem" />
   </div>
 </template>
@@ -49,6 +50,7 @@ import logoUrl from "@toonflow/assets/logo.svg";
 import type { MediaProvider } from "./types";
 import { settings, saveSettings } from "@/stores/settings";
 import { invalidateNodeModels } from "@toonflow/nodes-scaffold/nodeAi";
+import catalogDialog from "./catalogDialog.vue";
 import tfAccount from "../../tfAccount.vue";
 
 const { visible = true } = defineProps<{ visible?: boolean }>();
@@ -63,6 +65,9 @@ const addMode = ref<"builtin" | "custom">("builtin");
 const editingProvider = ref<MediaProvider>();
 const deletingFile = ref("");
 const fetchingFile = ref("");
+const catalogVisible = ref(false);
+const catalogProvider = ref<MediaProvider>();
+function saveCatalog(provider: MediaProvider) { saveProviderItem(provider); invalidateNodeModels("media"); window.dispatchEvent(new Event("toonflow:provider-config-changed")); }
 let loadRequest = 0;
 
 function getProviderApiKey(id: string) {
@@ -119,6 +124,7 @@ function editProvider(provider: MediaProvider) {
 }
 
 async function fetchModels(provider: MediaProvider) {
+  if (provider.id === "akc") { catalogProvider.value = provider; catalogVisible.value = true; return; }
   if (fetchingFile.value || deletingFile.value || !provider.modelsUrl || !provider.revision || provider.loadError) return;
   fetchingFile.value = provider.fileName;
   try {

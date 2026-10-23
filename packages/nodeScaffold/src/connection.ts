@@ -18,6 +18,7 @@ export type NodeConnectionFeedback = {
 };
 
 export type NodeData = {
+  mediaJobApplied?: string;
   label?: string;
   handles?: NodeHandle[];
   outputs?: NodeOutputs;

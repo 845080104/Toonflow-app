@@ -24,6 +24,9 @@
       <el-card v-else class="promptCard" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }">
         <referenceItem v-if="refList.length" v-model="refList" @preview="setReferencePreview" @remove="removeReference" />
         <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" placeholder="描述您想要的音频效果或输入待朗读文本" expandable />
+        <el-button v-if="!generating" text size="small" @click="openModelCatalog">获取智核音频模型</el-button>
+        <mediaModelInfo v-if="selectedModel" v-model="data.modelParameters" :providerId="selectedModel.providerId" :modelId="selectedModel.modelId" editable :disabled="generating || deleting" />
+        <mediaTaskStatus :job="mediaJob" :error="taskError" :busy="generating" @resume="generationState.resume()" @stop="generationState.stop()" />
         <div class="promptFooter">
           <el-select
             v-model="data.model"
@@ -50,7 +53,7 @@
               :disabled="deleting || uploading || actions?.processing || (!generating && (!generationPrompt || !selectedModel))"
               :title="generating ? '停止生成' : '生成音频'"
               :aria-label="generating ? '停止生成' : '生成音频'"
-              @click="generating ? generationController?.abort() : startGeneration().catch(error => showNodeError(error, '音频生成失败'))" />
+              @click="generating ? generationState.stop() : startGeneration().catch(error => showNodeError(error, '音频生成失败'))" />
           </div>
         </div>
       </el-card>
@@ -72,6 +75,8 @@ import audioPlayer from "@toonflow/node-audio/audioPlayer";
 import audioActions from "@toonflow/node-audio/audioActions";
 import promptInput from "@toonflow/node-shared/promptInput";
 import referenceItem from "@toonflow/node-shared/referenceItem";
+import mediaModelInfo from "@toonflow/node-shared/mediaModelInfo";
+import mediaTaskStatus from "@toonflow/node-shared/mediaTaskStatus";
 import mediaPrice from "@toonflow/node-shared/mediaPrice";
 import generationSettings from "./components/generationSettings.vue";
 import { formatOptions, languageOptions, sampleRateOptions } from "./audioSettings";
@@ -87,7 +92,7 @@ defineOptions({
 const vLoading = ElLoading.directive;
 const { id, node, nodeProps, nodeEvent, outputs, files, ai, updateNodeInternals } = useNode({ label: "音频生成" });
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
-const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; model: string; language: string; sampleRate: number; format: string });
+const data = computed(() => node.data as { modelParameters: Record<string, unknown>; modelParameterValues: Record<string, Record<string, unknown>>; prompt: string; promptModel: PromptModel; model: string; language: string; sampleRate: number; format: string });
 data.value.prompt ??= "";
 data.value.promptModel ??= [];
 data.value.model ??= "";
@@ -108,11 +113,23 @@ let generationController: AbortController | undefined;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 let modelsRefreshPending = false;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort());
+const generationState = useNodeGeneration(outputs, () => generationController?.abort(), {
+  ai, directory: () => files.getWorkspaceFiles().list(), data: node.data, type: "audio",
+});
+const { job: mediaJob, error: taskError } = generationState;
 const { generating } = generationState;
 const busy = computed(() => generating.value || uploading.value || deleting.value || !!actions.value?.processing);
 watch(busy, value => { if (!value && modelsRefreshPending) void refreshProviderModels(); });
 const selectedModel = computed(() => models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
+data.value.modelParameterValues ??= {};
+data.value.modelParameters ??= {};
+watch(() => data.value.model, (value, previous) => {
+  if (previous) data.value.modelParameterValues[previous] = data.value.modelParameters;
+  data.value.modelParameters = data.value.modelParameterValues[value] ?? {};
+}, { flush: "sync" });
+
+function openModelCatalog() { window.dispatchEvent(new CustomEvent("toonflow:open-model-catalog", { detail: { type: "audio" } })); }
+watch(generating, value => { if (!value && !disposed) void loadModels().catch(error => showNodeError(error, "模型读取失败")); });
 const modelGroups = computed(() => groupNodeModels(models.value));
 const generationPrompt = computed(() => [data.value.prompt.trim(), ...refList.value.flatMap((item, index) =>
   item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])].filter(Boolean).join("\n\n"));
@@ -122,6 +139,7 @@ const generationInput = computed<Omit<NodeAudioRequest, "directory"> | undefined
   return {
     providerId: choice.providerId,
     modelId: choice.modelId,
+    other: data.value.modelParameters,
     prompt: generationPrompt.value,
     language: data.value.language,
     sampleRate: data.value.sampleRate,
@@ -154,7 +172,7 @@ onScopeDispose(() => {
   disposed = true;
   window.removeEventListener("toonflow:plugin-installed", refreshProviderModels);
   window.removeEventListener("toonflow:provider-config-changed", refreshProviderModels);
-  generationController?.abort();
+
 });
 
 async function refreshProviderModels(event?: Event) {
@@ -176,13 +194,10 @@ function loadModels() {
   modelsLoading.value = true;
   modelsRequest = ai.getMediaModels().then(items => {
     if (disposed) return;
-    if (busy.value) {
-      modelsRefreshPending = true;
-      return;
-    }
+    if (uploading.value || deleting.value) { modelsRefreshPending = true; return; }
     models.value = items.filter(item => item.type === "audio");
     // ACT: 密钥被移除或旧默认不可用时，改选已配置密钥的模型；没有可用模型则留空。
-    if (!models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
+    if (!generating.value && !models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
       const first = models.value[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }
@@ -214,7 +229,7 @@ async function startGeneration() {
   }).catch(error => showNodeError(error, "音频生成失败")).finally(() => {
     generationController = undefined;
   });
-  return { status: "generating" };
+  return { status: "starting", message: "已启动本地后台处理；请查询 getGenerationStatus，上游任务 ID 保存后才表示提交成功" };
 }
 
 async function replaceOutput(event: Event) {
@@ -258,7 +273,8 @@ nodeEvent.on("delete", async () => {
 
 function getConfig() {
   return {
-    config: { providerId: selectedModel.value?.providerId ?? "", modelId: selectedModel.value?.modelId ?? "", language: data.value.language, sampleRate: data.value.sampleRate, format: data.value.format },
+    config: { providerId: selectedModel.value?.providerId ?? "", modelId: selectedModel.value?.modelId ?? "",
+      other: data.value.modelParameters, language: data.value.language, sampleRate: data.value.sampleRate, format: data.value.format },
     models: models.value,
     languages: languageOptions,
     sampleRates: sampleRateOptions,
@@ -282,6 +298,7 @@ nodeTools.register({
   name: "setConfig",
   description: "修改音频生成模型、语种、采样率或格式；先用 getConfig 查询选项，providerId 与 modelId 必须同时提供；不修改提示词、不启动生成",
   parameters: z.strictObject({
+    other: z.record(z.string(), z.unknown()).optional(),
     providerId: z.string().min(1).optional(),
     modelId: z.string().min(1).optional(),
     language: z.string().optional(),
@@ -303,6 +320,7 @@ nodeTools.register({
     if (args.language !== undefined) data.value.language = args.language;
     if (args.sampleRate !== undefined) data.value.sampleRate = args.sampleRate;
     if (args.format !== undefined) data.value.format = args.format;
+    if (args.other !== undefined) data.value.modelParameters = args.other;
     return getConfig();
   },
 });

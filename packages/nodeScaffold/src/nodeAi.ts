@@ -1,9 +1,11 @@
-import { onScopeDispose } from "vue";
+import { onScopeDispose, shallowRef } from "vue";
 import { runAgentLoop, type AgentTool, type AgentToolResult } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Message, type Model } from "@earendil-works/pi-ai";
 import { EventSourceParserStream } from "eventsource-parser/stream";
-import type { MediaGenerationRequest, MediaModel } from "@toonflow/tools-scaffold/runtime";
+import type { MediaGenerationRequest, MediaModel, MediaJob, GeneratedMedia } from "@toonflow/tools-scaffold/runtime";
 import type { NodeOutput } from "./values";
+
+export type { MediaJob } from "@toonflow/tools-scaffold/runtime";
 
 export type NodeAiModel = {
   providerId: string;
@@ -18,6 +20,7 @@ export type NodeMediaModel = Omit<MediaModel, "mode"> & {
   mode?: (string | string[])[];
 };
 export type NodeImageRequest = {
+  other?: Record<string, unknown>;
   directory: string;
   providerId: string;
   modelId: string;
@@ -32,7 +35,7 @@ export type NodeVideoRequest = Omit<MediaGenerationRequest, "size"> & { director
 export type NodeVideoResult = { path: string; mimeType: string; mediaType: "video" };
 export type NodeMediaPriceRequest = (NodeImageRequest & { mediaType: "image" }) | (NodeVideoRequest & { mediaType: "video" }) | (NodeAudioRequest & { mediaType: "audio" });
 export type NodeMediaPrice = { price: string; tips: string };
-export type NodeAudioRequest = Pick<MediaGenerationRequest, "providerId" | "modelId" | "prompt" | "images" | "audios" | "voice" | "speed" | "volume" | "pitch" | "language" | "format" | "sampleRate"> & { directory: string; outputDirectory: string };
+export type NodeAudioRequest = Pick<MediaGenerationRequest, "providerId" | "modelId" | "prompt" | "other" | "images" | "audios" | "voice" | "speed" | "volume" | "pitch" | "language" | "format" | "sampleRate"> & { directory: string; outputDirectory: string };
 export type NodeAudioResult = { path: string; mimeType: string; mediaType: "audio" };
 export type NodeAiRequest = {
   providerId: string;
@@ -167,7 +170,58 @@ async function requestModel(input: NodeAiRequest, context: Context, model: Model
   return stream;
 }
 
-export function useNodeAi() {
+export function useNodeAi(nodeId?: string) {
+  const mediaJob = shallowRef<MediaJob | null>(null);
+  let mediaDirectory = "";
+  let polling: Promise<GeneratedMedia[]> | undefined;
+  async function readJob(directory: string, id?: string) {
+    const query = new URLSearchParams({ directory, nodeId: nodeId ?? "", ...(id ? { id } : {}) });
+    const job = await readResult<MediaJob | null>(await fetch(`/api/ai/media/jobs/get?${query}`, {
+      headers: { "x-toonflow-workspace": "1" }, cache: "no-store", signal: controller.signal,
+    }));
+    mediaJob.value = job;
+    return job;
+  }
+  async function controlMediaJob(action: "resume" | "cancel") {
+    const job = mediaJob.value;
+    if (!job || !mediaDirectory) return;
+    mediaJob.value = await readResult<MediaJob>(await fetch("/api/ai/media/jobs/control", {
+      method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+      body: JSON.stringify({ directory: mediaDirectory, nodeId, id: job.id, action }), signal: controller.signal,
+    }));
+  }
+  async function waitForJob(directory: string, id: string) {
+    while (true) {
+      controller.signal.throwIfAborted();
+      const job = await readJob(directory, id);
+      if (!job) throw new Error("生成任务不存在");
+      if (job.status === "succeeded") return job.result;
+      if (!["queued", "running"].includes(job.status)) throw new Error(job.error || (job.status === "cancelled" ? "已停止等待，上游任务可能仍在继续" : "生成失败"));
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(controller.signal.reason); };
+        const timer = setTimeout(() => { controller.signal.removeEventListener("abort", abort); resolve(); }, 2000);
+        controller.signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+  }
+  async function restoreMediaGeneration(directory: string) {
+    if (!nodeId) return null;
+    mediaDirectory = directory;
+    const job = await readJob(directory);
+    if (!job) return null;
+    if (job.status === "succeeded") return job.result;
+    if (!["queued", "running"].includes(job.status)) return null;
+    polling = waitForJob(directory, job.id);
+    try { return await polling; } finally { polling = undefined; }
+  }
+  async function resumeMediaGeneration() {
+    if (polling) return polling;
+    await controlMediaJob("resume");
+    const job = mediaJob.value;
+    if (!job) return null;
+    polling = waitForJob(mediaDirectory, job.id);
+    try { return await polling; } finally { polling = undefined; }
+  }
   const controller = new AbortController();
   onScopeDispose(() => controller.abort());
   const requestSignal = (signal?: AbortSignal) => signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
@@ -248,6 +302,23 @@ export function useNodeAi() {
   }
 
   async function generateMedia<T extends "image" | "video" | "audio">(mediaType: T, input: NodeImageRequest | NodeVideoRequest | NodeAudioRequest, signal?: AbortSignal) {
+    if (nodeId) {
+      signal?.throwIfAborted();
+      mediaDirectory = input.directory;
+      const id = crypto.randomUUID();
+      // ACT: 提交只发一次；连接中断也不重发 POST。刷新后按节点找回已保存任务。
+      const job = await readResult<MediaJob>(await fetch("/api/ai/media/jobs/submit", {
+        method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+        body: JSON.stringify({ ...input, id, nodeId, mediaType }), signal: controller.signal,
+      }));
+      mediaJob.value = job;
+      const cancel = () => { void controlMediaJob("cancel").catch(() => {}); };
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
+      polling = waitForJob(input.directory, job.id);
+      try { return await polling as { path: string; mimeType: string; mediaType: T }[]; }
+      finally { signal?.removeEventListener("abort", cancel); polling = undefined; }
+    }
     return readResult<{ path: string; mimeType: string; mediaType: T }[]>(await fetch("/api/ai/media/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
@@ -318,5 +389,5 @@ export function useNodeAi() {
     return { text, ...(reasoning ? { reasoning } : {}) };
   }
 
-  return { getModels, getMediaModels, getMediaPrice, generateImage, generateVideo, generateAudio, generate };
+  return { mediaJob, restoreMediaGeneration, resumeMediaGeneration, controlMediaJob, getModels, getMediaModels, getMediaPrice, generateImage, generateVideo, generateAudio, generate };
 }

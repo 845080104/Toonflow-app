@@ -115,6 +115,7 @@
         "@toonflow/ext-scaffold": "workspace:*",
         "@toonflow/i18n": "workspace:*",
         "@toonflow/model-icons": "workspace:*",
+        "@toonflow/node-shared": "workspace:*",
         "@toonflow/nodes-scaffold": "workspace:*",
         "@toonflow/providers": "workspace:*",
         "@toonflow/server": "workspace:*",

@@ -9,7 +9,9 @@ const relativePath = z.string().min(1).max(2048).refine(
 const imageReference = z.strictObject({ path: relativePath, mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i) });
 const videoReference = z.strictObject({ path: relativePath, mimeType: z.string().regex(/^video\/[a-z0-9.+-]+$/i) });
 const audioReference = z.strictObject({ path: relativePath, mimeType: z.string().regex(/^audio\/[a-z0-9.+-]+$/i) });
+const other = z.record(z.string().min(1).max(100), z.json()).refine(value => JSON.stringify(value).length <= 50000, "模型参数不能超过 50 KB").optional();
 const sharedFields = {
+  other,
   providerId: z.string().regex(/^[a-z][a-zA-Z0-9]{0,95}$/),
   modelId: z.string().trim().min(1).max(256),
   prompt: z.string().trim().min(1).max(100000),
@@ -40,6 +42,7 @@ export const videoGenerationSchema = z.strictObject({
   ]).optional(),
 });
 export const audioGenerationSchema = z.strictObject({
+  other,
   providerId: sharedFields.providerId,
   modelId: sharedFields.modelId,
   prompt: sharedFields.prompt,

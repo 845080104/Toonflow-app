@@ -51,6 +51,9 @@
           {{ selectedMode === "startFrameOptional" ? "仅一张图片时作为尾帧；两张图片按顺序作为首帧、尾帧" : "图片引用按顺序作为首帧、尾帧" }}
         </div>
         <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" expandable />
+        <el-button v-if="!generating" text size="small" @click="openModelCatalog">获取智核视频模型</el-button>
+        <mediaModelInfo v-if="selectedModel" v-model="data.modelParameters" :providerId="selectedModel.providerId" :modelId="selectedModel.modelId" editable :disabled="generating || deleting" />
+        <mediaTaskStatus :job="mediaJob" :error="taskError" :busy="generating" @resume="generationState.resume()" @stop="generationState.stop()" />
         <div class="promptFooter">
           <el-select
             v-model="data.model"
@@ -89,7 +92,7 @@
               :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
               :title="generating ? '停止生成' : '生成视频'"
               :aria-label="generating ? '停止生成' : '生成视频'"
-              @click="generating ? generationController?.abort() : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
+              @click="generating ? generationState.stop() : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
           </div>
         </div>
       </el-card>
@@ -112,6 +115,8 @@ import videoPlayer from "@toonflow/node-video/videoPlayer";
 import videoActions from "@toonflow/node-video/videoActions";
 import referenceItem from "@toonflow/node-shared/referenceItem";
 import mediaHistory from "@toonflow/node-shared/mediaHistory";
+import mediaModelInfo from "@toonflow/node-shared/mediaModelInfo";
+import mediaTaskStatus from "@toonflow/node-shared/mediaTaskStatus";
 import mediaPrice from "@toonflow/node-shared/mediaPrice";
 import generationSettings from "./components/generationSettings.vue";
 
@@ -128,7 +133,7 @@ const { id, node, nodeProps, nodeEvent, outputs, files, ai, updateNodeInternals 
   label: "视频生成",
 });
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
-const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; model: string; duration?: number; resolution: string; ratio: string; mode: string; generateAudio: boolean });
+const data = computed(() => node.data as { modelParameters: Record<string, unknown>; modelParameterValues: Record<string, Record<string, unknown>>; prompt: string; promptModel: PromptModel; model: string; duration?: number; resolution: string; ratio: string; mode: string; generateAudio: boolean });
 data.value.prompt ??= "";
 data.value.promptModel ??= [];
 data.value.model ??= "";
@@ -147,13 +152,23 @@ const player = ref<InstanceType<typeof videoPlayer>>();
 const actions = ref<InstanceType<typeof videoActions>>();
 const videoWidth = ref(0);
 let generationController: AbortController | undefined;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort());
+const generationState = useNodeGeneration(outputs, () => generationController?.abort(), {
+  ai, directory: () => files.getWorkspaceFiles().list(), data: node.data, type: "video",
+});
+const { job: mediaJob, error: taskError } = generationState;
 const { generating } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 // ACT: 供应商未声明视频比例范围，沿用界面的通用比例，具体支持范围由供应商校验。
 const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
+data.value.modelParameterValues ??= {};
+data.value.modelParameters ??= {};
+watch(() => data.value.model, (value, previous) => {
+  if (previous) data.value.modelParameterValues[previous] = data.value.modelParameters;
+  data.value.modelParameters = data.value.modelParameterValues[value] ?? {};
+}, { flush: "sync" });
+
 const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
 const frameMode = computed(() => ["startEndRequired", "endFrameOptional", "startFrameOptional"].includes(String(selectedMode.value)));
 const mediaCounts = computed(() => ({
@@ -205,6 +220,8 @@ watch([selectedModel, () => data.value.duration], ([choice]) => {
   if (!ratioOptions.includes(data.value.ratio)) data.value.ratio = "9:16";
   if (choice.audio !== "optional") data.value.generateAudio = choice.audio === true;
 }, { flush: "sync" });
+function openModelCatalog() { window.dispatchEvent(new CustomEvent("toonflow:open-model-catalog", { detail: { type: "video" } })); }
+watch(generating, value => { if (!value && !disposed) void loadModels().catch(error => showNodeError(error, "模型读取失败")); });
 const modelGroups = computed(() => groupNodeModels(models.value));
 const generationPrompt = computed(() =>
   [
@@ -221,6 +238,7 @@ const generationInput = computed<Omit<NodeVideoRequest, "directory"> | undefined
   return {
     providerId: choice.providerId,
     modelId: choice.modelId,
+    other: data.value.modelParameters,
     prompt: generationPrompt.value,
     mode: selectedMode.value,
     duration: data.value.duration,
@@ -250,7 +268,7 @@ onScopeDispose(() => {
   disposed = true;
   window.removeEventListener("toonflow:plugin-installed", refreshProviderModels);
   window.removeEventListener("toonflow:provider-config-changed", refreshProviderModels);
-  generationController?.abort();
+
 });
 
 async function refreshProviderModels(event: Event) {
@@ -291,10 +309,10 @@ function loadModels() {
   if (modelsRequest) return modelsRequest;
   modelsLoading.value = true;
   modelsRequest = ai.getMediaModels().then((items) => {
-    if (disposed || generating.value || deleting.value) return;
+    if (disposed || deleting.value) return;
     models.value = items.filter((item) => item.type === "video");
     // ACT: 密钥被移除或旧默认不可用时，改选已配置密钥的模型；没有可用模型则留空。
-    if (!models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
+    if (!generating.value && !models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === data.value.model)) {
       const first = models.value[0];
       data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
     }
@@ -318,7 +336,7 @@ async function startGeneration() {
   const workspace = files.getWorkspaceFiles();
   const controller = new AbortController();
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  // ACT: 工具立即返回；服务端持有任务，节点关闭仅结束本地轮询。
   generation = generationState.run(() => workspace
     .list()
     .then(({ directory }) => {
@@ -334,7 +352,7 @@ async function startGeneration() {
     .finally(() => {
       generationController = undefined;
     });
-  return { status: "generating" };
+  return { status: "starting", message: "已启动本地后台处理；请查询 getGenerationStatus，上游任务 ID 保存后才表示提交成功" };
 }
 
 nodeEvent.on("save", (reason) => {
@@ -365,6 +383,7 @@ function getConfig() {
     config: {
       providerId: selectedModel.value?.providerId ?? "",
       modelId: selectedModel.value?.modelId ?? "",
+      other: data.value.modelParameters,
       duration: data.value.duration,
       resolution: data.value.resolution,
       ratio: data.value.ratio,
@@ -393,6 +412,7 @@ nodeTools.register({
   name: "setConfig",
   description: "修改此视频生成节点的模型、时长、分辨率、比例、模式或声音；先用 getConfig 查询能力，providerId 与 modelId 必须同时提供；mode 使用返回的原始字符串或数组，须匹配当前引用；不修改提示词、不启动生成",
   parameters: z.strictObject({
+    other: z.record(z.string(), z.unknown()).optional(),
     providerId: z.string().min(1).optional(),
     modelId: z.string().min(1).optional(),
     duration: z.number().positive().optional(),
@@ -424,6 +444,7 @@ nodeTools.register({
     if (args.ratio !== undefined) data.value.ratio = args.ratio;
     if (args.mode !== undefined) data.value.mode = JSON.stringify(args.mode);
     if (args.generateAudio !== undefined) data.value.generateAudio = args.generateAudio;
+    if (args.other !== undefined) data.value.modelParameters = args.other;
     return getConfig();
   },
 });

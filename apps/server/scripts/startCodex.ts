@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { existsSync, mkdir, readFile, writeAtomic } from "@toonflow/file";
+import { existsSync, mkdir, readFile, readdir, writeAtomic } from "@toonflow/file";
 import { startCodexBridge } from "@toonflow/codex-bridge";
 import config from "../../../electrobun.config";
 
@@ -35,7 +35,13 @@ try {
     mediaProviderConfigs: { ...(settings.mediaProviderConfigs as object ?? {}), codex: { baseUrl: apiUrl, apiKey: connection.token } },
   });
   const { createApp } = await import("../src/app");
+  const pluginHash = createHash("sha256");
+  for (const category of ["tools", "nodes", "ext", "providers"]) {
+    const folder = category === "providers" ? resolve(root, "packages/providers/src/media") : resolve(root, "build", category);
+    for (const name of (await readdir(folder)).filter(name => category === "providers" ? name.endsWith(".ts") : /\.(?:tool|umd)\.js$/.test(name)).sort()) pluginHash.update(category).update(name).update(await readFile(resolve(folder, name)));
+  }
   const app = await createApp({
+    pluginRevision: pluginHash.digest("hex"),
     webRoot: resolve(root, "build/web"), appVersion: config.app.version, dataDirectory,
     toolsRoot: resolve(root, "build/tools"), nodesRoot: resolve(root, "build/nodes"),
     extRoot: resolve(root, "build/ext"), providersRoot: resolve(root, "packages/providers/src"), skillsRoot: resolve(root, "packages/skills"),

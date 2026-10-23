@@ -31,7 +31,7 @@ function invalid(message: string, status = 400): never {
   throw Object.assign(new Error(message), { status });
 }
 
-function mediaErrorMessage(value: unknown, config: Record<string, unknown>, depth = 0): string {
+export function mediaErrorMessage(value: unknown, config: Record<string, unknown>, depth = 0): string {
   if (depth > 6 || value == null) return "";
   let message = "";
   if (typeof value === "string") {
@@ -326,6 +326,15 @@ export async function refreshMediaProviderModels(fileName: string, revision?: st
   if (revision !== undefined && revision !== provider.revision) invalid("供应商文件已被修改，请刷新页面后再获取", 409);
   if (!provider.modelsUrl) invalid("供应商未配置 modelsUrl");
   const apiKey = getMediaProviderApiKey(provider.id);
+  if (provider.id === "akc") {
+    const configs = conf.get("settings", {}).mediaProviderConfigs as Record<string, Record<string, unknown>> | undefined;
+    const runtime = await loadMediaProviderSource(provider.source, configs?.[provider.id] ?? {});
+    if (!runtime.getModels) invalid("请更新智核适配器后再获取模型");
+    const models = await runtime.getModels(modelType ?? "video");
+    // ACT: 智核目录按类型取回；这里只更新已导入模型，新增模型须在目录中显式勾选。
+    const imported = provider.models.map(model => models.find(item => item.id === model.id) ?? model);
+    return saveMediaProvider(fileName, mediaModelsSchema.parse(JSON.parse(JSON.stringify(imported))), provider.revision, apiKey);
+  }
   if (expectedApiKey !== undefined && apiKey !== expectedApiKey) invalid("供应商配置已变更，请重试", 409);
   const modelTypes = provider.id === tfRouter.id && !modelType ? ["video", "image", "audio"] : [modelType];
   // ACT: 各类型只并行获取，汇总后保存一次，避免同一供应商文件发生版本冲突。
@@ -380,7 +389,7 @@ export async function deleteMediaProvider(fileName: string, revision: string) {
   } finally { release(); }
 }
 
-export async function loadMediaProviderSource(source: string, config: Record<string, unknown> = {}, signal?: AbortSignal, fetchRequest = fetch, cwd?: string) {
+export async function loadMediaProviderSource(source: string, config: Record<string, unknown> = {}, signal?: AbortSignal, fetchRequest = fetch, cwd?: string, task?: ProviderTools["task"]) {
   signal?.throwIfAborted();
   const { id } = parseProvider(source);
   // ACT: VM 只隔离可信供应商的全局上下文；不可信代码需要独立进程等更强隔离。
@@ -413,6 +422,7 @@ export async function loadMediaProviderSource(source: string, config: Record<str
     config: providerConfig,
     signal,
     tool: {
+      task,
       fetch: signal ? Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
         signal.throwIfAborted();
         const requestSignal = init?.signal === null ? undefined : init?.signal ?? (input instanceof Request ? input.signal : undefined);

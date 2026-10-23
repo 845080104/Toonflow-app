@@ -1,7 +1,7 @@
 import { t, translateMessage } from "@/lib/i18n";
 import { mkdir, readFile, realpath, stat, unlink } from "@toonflow/file";
 import { join, relative } from "node:path";
-import { mediaProviders, type Provider } from "@toonflow/providers";
+import { mediaProviders, type Provider, type ProviderTools } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { getMediaProvider, listMediaProviders, loadMediaProviderSource } from "@/utils/media/provider";
@@ -39,11 +39,15 @@ export async function listMediaModels(): Promise<MediaModel[]> {
     const apiKey = record(configurations[provider.id]).apiKey;
     return typeof apiKey === "string" && !!apiKey.trim();
   }).flatMap(provider => provider.models.flatMap(model => {
+    if (model.available === false) return [];
     if (model.type !== "image" && model.type !== "video" && model.type !== "audio") return [];
     const builtIn = (mediaProviders as readonly Provider[]).find(item => item.id === provider.id)?.models.find(item => item.id === model.id);
     return [{
-      providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: model.label, type: model.type,
+      providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: provider.id === "akc" && model.id === "MiniMax-H3" && !model.label.includes("原生兼容") ? `${model.label}（原生兼容）` : model.label, type: model.type,
       supportsPrice: "supportsPrice" in provider && provider.supportsPrice === true,
+      description: typeof model.description === "string" ? model.description : undefined,
+      tags: model.tags as string[] | undefined, icon: model.icon as string | undefined, available: model.available as boolean | undefined,
+      parameters: model.parameters as MediaModel["parameters"],
       mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio,
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
@@ -128,12 +132,12 @@ async function prepareRequest<T>(directory: string | undefined, mediaType: "imag
   };
   const images = await references(request.images, "image");
   if (mediaType === "audio") return {
-    type: "audio" as const, model: request.modelId, text: request.prompt, images, audios: await references(request.audios, "audio"),
+    type: "audio" as const, other: request.other, model: request.modelId, text: request.prompt, images, audios: await references(request.audios, "audio"),
     voice: request.voice, speed: request.speed, volume: request.volume, pitch: request.pitch, language: request.language, format: request.format, sampleRate: request.sampleRate,
   };
-  if (mediaType === "image") return { type: "image" as const, model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size };
+  if (mediaType === "image") return { type: "image" as const, other: request.other, model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size };
   return {
-    type: "video" as const, model: request.modelId, prompt: request.prompt, images,
+    type: "video" as const, other: request.other, model: request.modelId, prompt: request.prompt, images,
     videos: await references(request.videos, "video"), audios: await references(request.audios, "audio"),
     firstFrame: (await references(request.firstFrame ? [request.firstFrame] : undefined, "image"))?.[0],
     lastFrame: (await references(request.lastFrame ? [request.lastFrame] : undefined, "image"))?.[0],
@@ -141,11 +145,11 @@ async function prepareRequest<T>(directory: string | undefined, mediaType: "imag
   };
 }
 
-async function configuredProvider(request: MediaGenerationRequest, mediaType: "image" | "video" | "audio", signal?: AbortSignal, directory?: string) {
+async function configuredProvider(request: MediaGenerationRequest, mediaType: "image" | "video" | "audio", signal?: AbortSignal, directory?: string, task?: ProviderTools["task"]) {
   const info = await getMediaProvider(request.providerId);
-  if (!info.models.some(model => model.id === request.modelId && model.type === mediaType)) invalid("所选媒体模型不存在或类型不匹配，请重新选择");
+  if (!task?.upstream && !info.models.some(model => model.id === request.modelId && model.type === mediaType)) invalid("所选媒体模型不存在或类型不匹配，请重新选择");
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
-  return loadMediaProviderSource(info.source, record(configurations[info.id]), signal, undefined, directory);
+  return loadMediaProviderSource(info.source, record(configurations[info.id]), signal, undefined, directory, task);
 }
 
 async function preparePriceRequest(directory: string | undefined, mediaType: "image" | "video" | "audio", request: MediaGenerationRequest, signal?: AbortSignal) {
@@ -173,18 +177,21 @@ export async function generateMedia(
   mediaType: "image" | "video" | "audio",
   request: MediaGenerationRequest,
   signal?: AbortSignal,
+  task?: ProviderTools["task"],
 ): Promise<GeneratedMedia[]> {
   signal?.throwIfAborted();
   if (!request.prompt.trim()) invalid("请输入生成提示词");
   const directory = await realpath(cwd);
   const outputDirectory = request.outputDirectory ?? "assets/generated";
   await resolveWorkspacePath(directory, outputDirectory, true);
-  const provider = await configuredProvider(request, mediaType, signal, directory);
+  const provider = await configuredProvider(request, mediaType, signal, directory, task);
   const generate = mediaType === "image" ? provider.generateImage : mediaType === "video" ? provider.generateVideo : provider.generateAudio;
   if (typeof generate !== "function") invalid(t`此供应商不支持${translateMessage({ image: "图片", video: "视频", audio: "音频" }[mediaType])}生成`);
   const rules = Array.isArray(provider.rules) ? provider.rules : [];
   if (rules.some(rule => rule.field === "apiKey") && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) invalid("请先在媒体模型设置中配置供应商 API Key");
-  const prepared = await prepareRequest(directory, mediaType, request, readReference, signal);
+  task?.log("preparing", task.upstream ? "恢复现有上游任务查询，不重新提交" : "读取生成参数与参考素材");
+  const prepared = task?.upstream ? { type: mediaType, model: request.modelId, prompt: request.prompt }
+    : await prepareRequest(directory, mediaType, request, readReference, signal);
   signal?.throwIfAborted();
   const finish = beginGeneration(provider);
   const written: string[] = [];
@@ -194,6 +201,7 @@ export async function generateMedia(
     const { type, ...parameters } = prepared;
     const assets = type === "audio" ? await provider.generateAudio!(parameters as AudioRequest)
       : type === "image" ? await provider.generateImage!(parameters as ImageRequest) : await provider.generateVideo!(parameters as VideoRequest);
+    task?.log("downloading", "上游已返回结果，下载并保存到工作区");
     if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     for (const asset of assets) {
       signal?.throwIfAborted();

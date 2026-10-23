@@ -19,6 +19,12 @@ interface ProviderModel {
   mode?: (ImageMode | VideoMode)[];
   associationSkills?: string;
   audio?: "optional" | boolean;
+  languageProtocol?: "openai-completions" | "openai-responses" | "anthropic-messages" | "unsupported";
+  description?: string;
+  tags?: string[];
+  icon?: string;
+  available?: boolean;
+  parameters?: { name: string; label?: string; type: string; required?: boolean; description?: string; options?: { value: string | number | boolean; label?: string; currently_unavailable?: boolean }[] }[];
   imageSizes?: string[];
   imageRatios?: string[];
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
@@ -79,6 +85,12 @@ interface FfmpegRequiredError extends Error {
 
 interface ProviderTools {
   fetch: typeof globalThis.fetch;
+  /** 后台任务宿主；先保存上游 ID 再轮询，恢复时禁止重新提交。 */
+  task?: {
+    upstream?: { id: string; protocol: string };
+    save(upstream: { id: string; protocol: string }): void;
+    log(phase: string, message: string): void;
+  };
   /** 提取供应商错误正文中的可读原因，并隐藏配置中的密钥和 URL 查询参数。 */
   errorMessage(value: unknown): string;
   hash: typeof Bun.hash;
@@ -206,6 +218,8 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
    * 提供此字段后可手动获取；TF-Router 手动获取图片、视频、音频，并在有 key 的程序启动时自动更新。
    */
   modelsUrl?: string;
+  getModels?: (this: ProviderContext<ProviderConfig<TRules>>, type?: ModelType) => Promise<ProviderModel[]>;
+  getModelDetails?: (this: ProviderContext<ProviderConfig<TRules>>, model: string) => Promise<Record<string, unknown>>;
   protocol?: "openai-completions" | "openai-responses" | "anthropic-messages";
   /** 厂商说明的 Markdown 内容。 */
   readme?: string;

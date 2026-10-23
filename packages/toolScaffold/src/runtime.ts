@@ -71,6 +71,15 @@ export interface CanvasContext extends CanvasInfo {
   call(request: CanvasToolCall, signal?: AbortSignal): Promise<unknown>;
 }
 
+export interface MediaJob {
+  id: string; nodeId: string; mediaType: "image" | "video" | "audio";
+  providerId: string; modelId: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "unknown";
+  phase: string; createdAt: string; updatedAt: string; error?: string;
+  upstream?: { id: string; protocol: string }; result: GeneratedMedia[]; canResume: boolean;
+  logs: { time: string; phase: string; message: string }[];
+}
+
 export interface MediaModel {
   supportsPrice?: boolean;
   providerId: string;
@@ -79,6 +88,11 @@ export interface MediaModel {
   label: string;
   type: "image" | "video" | "audio";
   mode?: unknown;
+  description?: string;
+  tags?: string[];
+  icon?: string;
+  available?: boolean;
+  parameters?: { name: string; label?: string; type: string; required?: boolean; description?: string; options?: { value: string | number | boolean; label?: string; currently_unavailable?: boolean }[] }[];
   imageSizes?: string[];
   imageRatios?: string[];
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
@@ -95,6 +109,7 @@ export interface MediaGenerationRequest {
   providerId: string;
   modelId: string;
   prompt: string;
+  other?: Record<string, unknown>;
   outputDirectory?: string;
   images?: MediaReference[];
   videos?: MediaReference[];

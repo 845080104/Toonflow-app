@@ -3,6 +3,7 @@ import * as browser from "@/utils/browser";
 import * as singleAgent from "@/utils/singleAgent";
 import * as desktop from "@/utils/desktop";
 import * as providerDebug from "@/utils/media/debug";
+import * as mediaJobs from "@/utils/media/jobs";
 import * as mediaGeneration from "@/utils/media/generation";
 import * as mediaProvider from "@/utils/media/provider";
 import * as mediaBilling from "@/utils/media/billing";
@@ -35,6 +36,7 @@ export default {
   desktop,
   providerDebug,
   mediaGeneration,
+  mediaJobs,
   mediaProvider,
   mediaBilling,
   ffmpeg,
